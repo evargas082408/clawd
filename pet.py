@@ -218,7 +218,7 @@ def _hwnd_exe(h):
 
 
 def find_claude_window():
-    """Handle of the Claude desktop app's main window, or None."""
+    """Handle of the Claude desktop app's main window (the one in front, if there are several), or None."""
     try:
         user32 = ctypes.windll.user32
         found = []
@@ -228,13 +228,26 @@ def find_claude_window():
             if h and user32.IsWindowVisible(ctypes.c_void_p(h)) and _hwnd_title(h) == "Claude" \
                     and _hwnd_exe(h) == "claude.exe":
                 found.append(h)
-                return False
             return True
 
         user32.EnumWindows(proto(cb), 0)
+        fg = user32.GetForegroundWindow()
+        if fg in found:
+            return fg
         return found[0] if found else None
     except Exception:
         return None
+
+
+_fg_cache = [None, False]
+
+
+def claude_in_front():
+    """True while any window of the Claude app (main window, its menus and pop-ups) is in front."""
+    fg = ctypes.windll.user32.GetForegroundWindow()
+    if fg != _fg_cache[0]:
+        _fg_cache[0], _fg_cache[1] = fg, bool(fg) and _hwnd_exe(fg) == "claude.exe"
+    return _fg_cache[1]
 
 
 def window_rect(h, visible=False):
@@ -318,42 +331,72 @@ def serve(sock, q):
             time.sleep(0.2)
 
 
-class SendLocator:
-    """Asks Windows UI Automation where the Claude app's Send button is, through one long-lived
-    PowerShell helper (starting PowerShell is slow, querying it is quick)."""
+class ComposerLocator:
+    """Asks Windows UI Automation where the Claude app's message box is, through one long-lived
+    PowerShell helper. The helper keeps hold of the elements it found, so repeat checks (5x a second)
+    cost about a millisecond; it only searches again when the box is replaced (new tab, switching tabs).
+    Answers 'bx by bw bh sx sy sw sh': the bordered box, and its Send/Stop button (-1s if none)."""
     SCRIPT = r'''
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 Add-Type 'using System.Runtime.InteropServices; public class ClawdDpi { [DllImport("user32.dll")] public static extern bool SetProcessDPIAware(); }'
 [ClawdDpi]::SetProcessDPIAware() | Out-Null
 $A = [System.Windows.Automation.AutomationElement]
-$cond = New-Object System.Windows.Automation.AndCondition -ArgumentList @(,[System.Windows.Automation.Condition[]]@(
-  (New-Object System.Windows.Automation.PropertyCondition($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)),
-  (New-Object System.Windows.Automation.PropertyCondition($A::NameProperty, 'Send'))))
-$condP = New-Object System.Windows.Automation.AndCondition -ArgumentList @(,[System.Windows.Automation.Condition[]]@(
-  (New-Object System.Windows.Automation.PropertyCondition($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Edit)),
-  (New-Object System.Windows.Automation.PropertyCondition($A::NameProperty, 'Prompt'))))
+$TS = [System.Windows.Automation.TreeScope]
+$W = [System.Windows.Automation.TreeWalker]::RawViewWalker
+$editCond = New-Object System.Windows.Automation.PropertyCondition($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Edit)
+$btnCond = New-Object System.Windows.Automation.PropertyCondition($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)
+$cache = @{ hwnd = ''; box = $null }
+
+function Ok($e) {
+  if ($e -eq $null) { return $false }
+  try { $r = $e.Current.BoundingRectangle; return (-not $e.Current.IsOffscreen) -and $r.Width -gt 0 -and $r.Height -gt 0 } catch { return $false }
+}
+
+function Find-Box($root) {
+  # the message field: the bottom-most visible prompt editor
+  $edit = $null
+  foreach ($e in $root.FindAll($TS::Descendants, $editCond)) {
+    if (($e.Current.Name -eq 'Prompt' -or $e.Current.ClassName -like '*ProseMirror*') -and (Ok $e)) {
+      if ($edit -eq $null -or $e.Current.BoundingRectangle.Y -gt $edit.Current.BoundingRectangle.Y) { $edit = $e }
+    }
+  }
+  if ($edit -eq $null) { return $null }
+  # the bordered box around it: the surface element, else the first padded ancestor
+  $et = $edit.Current.BoundingRectangle.Y
+  $padded = $null
+  $cur = $edit
+  for ($i = 0; $i -lt 8; $i++) {
+    $cur = $W.GetParent($cur)
+    if ($cur -eq $null) { break }
+    if ($cur.Current.ClassName -like '*bg-surface*') { return $cur }
+    if ($padded -eq $null -and $cur.Current.BoundingRectangle.Y -le $et - 6) { $padded = $cur }
+  }
+  if ($padded -ne $null) { return $padded }
+  return $edit
+}
+
 while ($true) {
   $line = [Console]::In.ReadLine()
   if ($line -eq $null) { break }
   $out = 'none'
   try {
-    $root = $A::FromHandle([IntPtr][long]$line)
-    $best = $null
-    foreach ($e in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)) {
-      $r = $e.Current.BoundingRectangle
-      if ($e.Current.IsOffscreen -or $r.Width -le 0 -or $r.Height -le 0) { continue }
-      if ($best -eq $null -or $r.Y -gt $best.Y) { $best = $r }
+    if ($cache.hwnd -ne $line -or -not (Ok $cache.box)) {
+      $cache.hwnd = $line
+      $cache.box = Find-Box ($A::FromHandle([IntPtr][long]$line))
     }
-    if ($best -ne $null) { $out = '{0} {1} {2} {3}' -f [int]$best.X, [int]$best.Y, [int]$best.Width, [int]$best.Height }
-    else {
-      # no Send button right now: estimate where it sits, just right of the prompt box
-      $ed = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condP)
-      if ($ed -ne $null -and -not $ed.Current.IsOffscreen) {
-        $r = $ed.Current.BoundingRectangle
-        if ($r.Width -gt 0) { $out = '{0} {1} {2} {3}' -f [int]($r.X + $r.Width + $r.Height * 0.27), [int]($r.Y - $r.Height * 0.1), [int]($r.Height * 1.23), [int]($r.Height * 1.2) }
+    if ($cache.box -ne $null) {
+      $b = $cache.box.Current.BoundingRectangle
+      $s = '-1 -1 -1 -1'
+      foreach ($e in $cache.box.FindAll($TS::Descendants, $btnCond)) {
+        $n = $e.Current.Name
+        if (($n -like 'Send*' -or $n -like 'Stop*') -and (Ok $e)) {
+          $r = $e.Current.BoundingRectangle
+          $s = '{0} {1} {2} {3}' -f [int]$r.X, [int]$r.Y, [int]$r.Width, [int]$r.Height
+        }
       }
+      $out = '{0} {1} {2} {3} {4}' -f [int]$b.X, [int]$b.Y, [int]$b.Width, [int]$b.Height, $s
     }
-  } catch { }
+  } catch { $cache.hwnd = '' }
   [Console]::Out.WriteLine($out)
   [Console]::Out.Flush()
 }
@@ -370,7 +413,7 @@ while ($true) {
             creationflags=0x08000000)  # CREATE_NO_WINDOW
 
     def locate(self, hwnd):
-        """screen rect (x, y, w, h) of the Send button, or None"""
+        """((bx, by, bw, bh), (sx, sy, sw, sh) or None) in screen pixels, or None if there's no box"""
         try:
             if self.proc is None or self.proc.poll() is not None:
                 self._start()
@@ -381,58 +424,59 @@ while ($true) {
             log("locator failed", repr(e))
             self.proc = None
             return None
-        if not line or line == "none":
-            return None
         try:
-            x, y, w, h = (int(v) for v in line.split())
-            return x, y, w, h
+            v = [int(x) for x in line.split()]
         except ValueError:
             return None
+        if len(v) != 8 or v[2] <= 0:
+            return None
+        return tuple(v[:4]), (tuple(v[4:]) if v[6] > 0 else None)
 
 
 class ClaudeWatcher(threading.Thread):
-    """Keeps an eye on the Claude app window (opened / closed) and, while Clawd wants to perch,
-    on where its Send button is."""
+    """Keeps an eye on the Claude app window (opened / closed / which one you're using) and, while
+    Clawd wants to perch, on where its message box is - 5 times a second, so he can follow the box
+    as it grows while you type, and as you open or flip between tabs."""
 
     def __init__(self, q):
         super().__init__(daemon=True)
         self.q = q
         self.hwnd = find_claude_window()
-        self.send = None    # Send button as (from right edge, from bottom edge, w, h) of the window
-        self.want = False   # set by the pet while perching / about to perch
-        self.force = False  # ask for a fresh look right away
-        self.locator = SendLocator()
+        self.perch_rel = None  # perch point as (from the window's right edge, from its bottom edge)
+        self.want = False      # set by the pet while perching / about to perch
+        self.force = False     # kept for callers; every check is a fresh look now
+        self.locator = ComposerLocator()
         self.misses = 0
 
     def run(self):
-        last, last_size = 0.0, None
         while True:
             try:
                 h = find_claude_window()
                 if h and not self.hwnd:
                     self.q.put(("claude_opened", ""))
                 elif self.hwnd and not h:
-                    self.send = None
+                    self.perch_rel = None
                     self.q.put(("claude_closed", ""))
                 self.hwnd = h
                 if h and self.want and not is_iconic(h):
+                    found = self.locator.locate(h)
                     r = window_rect(h)
-                    size = (r[2] - r[0], r[3] - r[1]) if r else None
-                    if self.force or size != last_size or time.time() - last > (4.0 if self.send else 1.0):
-                        self.force = False
-                        sb = self.locator.locate(h)
-                        r = window_rect(h)
-                        if sb and r:
-                            self.send = (r[2] - sb[0], r[3] - sb[1], sb[2], sb[3])
-                            self.misses = 0
-                        else:  # the app's UI is sometimes mid-redraw; only give up after a few misses
-                            self.misses += 1
-                            if self.misses >= 3:
-                                self.send = None
-                        last, last_size = time.time(), size
+                    if found and r:
+                        (bx, by, bw, bh), btn = found
+                        if btn:  # stand right above the Send / Stop button...
+                            x = btn[0] + btn[2] / 2
+                        else:    # ...or where it normally sits, near the box's right end
+                            dpi = ctypes.windll.user32.GetDpiForWindow(ctypes.c_void_p(h)) or 96
+                            x = bx + bw - 20.3 * dpi / 96
+                        self.perch_rel = (r[2] - x, r[3] - by)  # feet on the box's top border
+                        self.misses = 0
+                    else:  # mid tab-switch the box can vanish for a moment: hold on before giving up
+                        self.misses += 1
+                        if self.misses >= 5:
+                            self.perch_rel = None
             except Exception as e:
                 log("watcher error", repr(e))
-            time.sleep(0.4)
+            time.sleep(0.2 if self.want else 0.5)
 
 
 def ease_out_back(u, k=1.4):
@@ -527,6 +571,8 @@ class Pet:
         self.perched = False        # sitting on the Claude app's input box
         self.perch_pt = None        # screen point on top of the input box, above Send
         self.perch_wanted_until = 0
+        self.rel_s = None           # smoothed perch point (relative to the Claude window)
+        self.vis, self.vis_raw, self.vis_since = False, False, 0.0
         self.leap = None            # arc from wherever he is onto the input box
         self.sm = None              # "summon Claude" sequence
         self.pan = None             # the window that grows out of him
@@ -928,21 +974,31 @@ class Pet:
 
     # ---------- perching on the Claude app's input box
     def perch_point(self):
-        """screen point on the top edge of Claude's input box, above the Send button (or None)"""
+        """screen point on the top border of Claude's message box, above the Send button (or None)"""
         w = self.watcher
-        if not w or not w.hwnd or not w.send or is_iconic(w.hwnd):
+        if not w or not w.hwnd or not w.perch_rel or is_iconic(w.hwnd):
             return None
         r = window_rect(w.hwnd)
         if not r:
             return None
-        dx, dy, bw, bh = w.send
-        return r[2] - dx + bw / 2, r[3] - dy - 7.5 * self.scale
+        rel = self.rel_s or w.perch_rel
+        return r[2] - rel[0], r[3] - rel[1]
+
+    def ease_perch(self, dt):
+        """glide (instead of teleporting) when the box grows, shrinks or moves inside the window"""
+        tgt = self.watcher.perch_rel if self.watcher else None
+        if not tgt:
+            return
+        if self.rel_s is None:
+            self.rel_s = tgt
+            return
+        k = 1 - math.exp(-dt * 14)
+        self.rel_s = (self.rel_s[0] + (tgt[0] - self.rel_s[0]) * k, self.rel_s[1] + (tgt[1] - self.rel_s[1]) * k)
 
     def request_perch(self, secs=25):
         self.perch_wanted_until = time.time() + secs
         if self.watcher:
             self.watcher.want = True
-            self.watcher.force = True
 
     def unperch(self, fall=True):
         S = self.S
@@ -981,6 +1037,7 @@ class Pet:
         else:
             x0, y0 = self.fx, self.fy
         self.perch_pt = pt
+        self.rel_s = self.watcher.perch_rel
         tx, ty = pt[0], pt[1] - 5 * S
         dist = math.hypot(tx - x0, ty - y0)
         self.leap = {"x0": x0, "y0": y0, "t0": time.time(), "T": max(0.6, min(1.3, 0.55 + dist / 2600)),
@@ -1506,10 +1563,18 @@ class Pet:
                 if self.mode != "idle":
                     return
             else:
-                # only show himself while you're actually looking at Claude
-                perch_visible = pt is not None and foreground_is(self.watcher.hwnd)
+                # only show himself while you're actually looking at Claude; debounced so flicking
+                # between apps or tabs quickly doesn't make him bob up and down
+                raw = pt is not None and claude_in_front()
+                if raw != self.vis_raw:
+                    self.vis_raw, self.vis_since = raw, now
+                if raw and now - self.vis_since >= 0.12:
+                    self.vis = True
+                elif not raw and now - self.vis_since >= 0.35:
+                    self.vis = False
+                perch_visible = self.vis
         elif (now < self.perch_wanted_until and not self.hover and self.pending_alert is None and self.watcher
-              and self.watcher.hwnd and foreground_is(self.watcher.hwnd) and self.perch_point()):
+              and self.watcher.hwnd and claude_in_front() and self.perch_point()):
             if self.start_leap():
                 return
         # hover
@@ -1724,6 +1789,10 @@ class Pet:
                 self.watcher.want = self.perched or self.mode in ("leap", "summon") or now < self.perch_wanted_until
             self.tick_panel(now)
             self.step_size(now)
+            if self.perched or self.mode == "leap":
+                self.ease_perch(dt)
+            else:
+                self.rel_s = None
             if self.mode == "leap":
                 self.tick_leap(now, dt)
             elif self.mode == "summon":
