@@ -61,7 +61,6 @@ DROP = [".X.", "XXX", ".X."]
 
 LINES_CLICK = ["hi!", "*beep*", "hehe", "pat pat", "I'm helping!", "boop", "need a hand?", "hey :)", "clawd!"]
 LINES_POP = ["hi :)", "just checking", "still here!", "*yawn*", "o/", "wheee"]
-LINES_LAND = ["oof!", "wheee!", "again!", "I'm ok!", "made it!", "dizzy..."]
 LINES_GRAB = ["hey!", "wahh!", "put me down!", "eek!", "hehe stop"]
 LINES_DONE = ["all done!", "done :)", "ta-da!", "finished!", "your turn!"]
 
@@ -288,6 +287,7 @@ class Pet:
         self.drag_hist = collections.deque()
         self.fx = self.fy = self.vx = self.vy = 0.0
         self.swing = 0.0
+        self.slide = 0.0  # leftover throw momentum along the edge after landing
         self.grav = "bottom"
 
         self.menu = tk.Menu(root, tearoff=0)
@@ -535,6 +535,7 @@ class Pet:
             px, py = self.root.winfo_pointerxy()
             self.fx, self.fy = px, py + 4 * S
         self.swing = 0.0
+        self.slide = 0.0
         self.mode = "drag"
         self.drag_hist.clear()
         self.particles = []
@@ -587,16 +588,20 @@ class Pet:
         m = self.CW * 0.55
         self.pos = max(m, min(L - m, along))
         self.target = self.pos
-        self.p = self.pgoal = float(self.FULL)
-        self.jump, self.jv = 0.0, 4.0 * self.S
-        self.action, self.action_until = "landed", now + 1.6
-        self.next_action = now + random.uniform(3, 5)
+        self.p = float(self.FULL)          # touches down exactly where he was flying...
+        self.pgoal = float(self.HANDS)     # ...and immediately slips down into hiding
+        self.jump, self.jv = 0.0, 0.0
+        along_v = self.vx if edge in ("top", "bottom") else self.vy
+        cap = 2500 * self.S / 5
+        self.slide = max(-cap, min(cap, along_v * 0.6))
+        self.action, self.action_until = "landed", now + 0.45
+        self.next_action = now + random.uniform(4, 7)
         self.pending_edge = None
         self.hover = False
+        self.bubble = None
         self.particles = []
         self._geom = None
-        self.say(random.choice(LINES_LAND), 1.5)
-        for _ in range(3):
+        for _ in range(2):
             self.spawn("spark")
 
     def tick_drag(self, now, dt):
@@ -653,10 +658,24 @@ class Pet:
         if hits:
             self.land(min(hits, key=lambda h: h[1])[0])
             return
+        orient = self.grav
+        soon = []
+        if self.vx < 0:
+            soon.append(("left", (self.fx - l - reach) / -self.vx))
+        if self.vx > 0:
+            soon.append(("right", (r - self.fx - reach) / self.vx))
+        if self.vy < 0:
+            soon.append(("top", (self.fy - t - reach) / -self.vy))
+        if self.vy > 0:
+            soon.append(("bottom", (b - self.fy - reach) / self.vy))
+        if soon:
+            edge, eta = min(soon, key=lambda e: e[1])
+            if eta < 0.1:
+                orient = edge
         F = self.FW
         self.place(F, F, int(self.fx - F / 2), int(self.fy - F / 2))
         self.canvas.delete("all")
-        self.free = (self.grav, F / 2, F / 2)
+        self.free = (orient, F / 2, F / 2)
         self.draw_body(0, 0, "open", 0, "flail", int(self.t * 14) % 2, blush=False)
         self.free = None
         self.draw_particles(dt)
@@ -982,10 +1001,11 @@ class Pet:
                     return
         elif not self.hover:
             if self.action in ("peek", "popup", "sleep", "cheer", "landed") and now > self.action_until:
+                landed = self.action == "landed"
                 self.action = None
                 self.wave = False
                 self.sleeping = False
-                self.pgoal = random.choice([self.HANDS, self.EYES])
+                self.pgoal = self.HANDS if landed else random.choice([self.HANDS, self.EYES])
             if now >= self.next_action and self.pending_edge is None:
                 self.choose_action(now)
 
@@ -997,6 +1017,19 @@ class Pet:
             self.target = self.pos
             self.pgoal = self.EYES if random.random() < 0.5 else self.HANDS
             self._geom = None
+
+        # sliding along the edge after a throw
+        if abs(self.slide) > 2 and not self.hover:
+            L, m = self.edge_len(), self.CW * 0.55
+            self.pos += self.slide * dt
+            self.slide *= math.exp(-dt * 4.5)
+            if self.pos < m or self.pos > L - m:
+                self.pos = max(m, min(L - m, self.pos))
+                self.slide = 0.0
+            self.target = self.pos
+            self.look = 1 if self.slide > 0 else -1
+        else:
+            self.slide = 0.0
 
         # walking along the edge (only while low)
         diff = self.target - self.pos

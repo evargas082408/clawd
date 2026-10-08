@@ -14,7 +14,7 @@ A tiny pixel desktop pet for Windows that lives on the edges of your screen and 
 - **Pops up** sometimes to wave or say hi, and naps occasionally.
 - **Hover** to pet it: it climbs out, gets happy eyes, and hearts float up. Move your mouse away and it ducks back down right away.
 - **Click** it and it hops.
-- **Drag** it off its edge: it squirms in your grip. Let go and it falls the way you threw it. Gravity pulls it toward the nearest edge, and if you let go in the middle of the screen it just falls down. It lands on whichever edge it hits first and settles in there.
+- **Drag** it off its edge: it squirms in your grip. Let go and it falls the way you threw it. Gravity pulls it toward the nearest edge, and if you let go in the middle of the screen it just falls down. It turns to face the wall it's about to hit, lands, slides along the edge with leftover momentum, and slips straight back into hiding.
 - **Right-click** for a menu: test alert, hide for 10 minutes, start with Windows, quit.
 - **Permission alerts:** when Claude Code asks for permission, Clawd drops down from the top-center of the screen and dangles there until you respond. Click it to jump to the Claude window.
 - **Done cheer:** when Claude finishes a reply, Clawd pops up and cheers.
