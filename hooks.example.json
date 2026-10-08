@@ -1,0 +1,85 @@
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:/Path/To/Python/python.exe",
+            "args": [
+              "C:/path/to/claude-pet/notify.py",
+              "alert"
+            ],
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:/Path/To/Python/python.exe",
+            "args": [
+              "C:/path/to/claude-pet/notify.py",
+              "alert"
+            ],
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:/Path/To/Python/python.exe",
+            "args": [
+              "C:/path/to/claude-pet/notify.py",
+              "clear"
+            ],
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:/Path/To/Python/python.exe",
+            "args": [
+              "C:/path/to/claude-pet/notify.py",
+              "clear"
+            ],
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:/Path/To/Python/python.exe",
+            "args": [
+              "C:/path/to/claude-pet/notify.py",
+              "done"
+            ],
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
