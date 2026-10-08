@@ -2,6 +2,11 @@
 
 A tiny pixel desktop pet for Windows that lives on the edges of your screen and taps you on the shoulder when Claude Code needs your permission.
 
+> [!WARNING]
+> **Use at your own risk: Clawd is an experimental, untested hobby project. Expect bugs.**
+>
+> There is no test suite and no QA. It has only been tried on one Windows 11 machine. It may glitch, get stuck, land in odd places, miss notifications, or misbehave with multiple monitors, unusual taskbar setups, or display scaling. It is not affiliated with or endorsed by Anthropic. If something goes wrong, right-click Clawd and choose **Quit**, or end `pythonw.exe` in Task Manager.
+
 ## What it does
 
 - **Hides** behind a screen edge, usually with just its two little hands holding on.
@@ -14,6 +19,7 @@ A tiny pixel desktop pet for Windows that lives on the edges of your screen and 
 - **Permission alerts:** when Claude Code asks for permission, Clawd drops down from the top-center of the screen and dangles there until you respond. Click it to jump to the Claude window.
 - **Done cheer:** when Claude finishes a reply, Clawd pops up and cheers.
 - Stays quiet if you're already looking at the Claude desktop app or a claude.ai tab.
+- **Opens Claude for you:** when Clawd starts and neither the Claude desktop app nor Claude Code is running, it launches the Claude app. Clicking Clawd also opens the app if no Claude window can be found.
 
 ## Requirements
 

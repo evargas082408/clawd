@@ -17,6 +17,7 @@ import os
 import queue
 import random
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -121,8 +122,37 @@ def focus_claude():
             if user32.IsIconic(h):
                 user32.ShowWindow(h, 9)
             user32.SetForegroundWindow(h)
+        else:
+            open_claude()
     except Exception as e:
         log("focus_claude failed", e)
+
+
+def claude_running():
+    """True if the Claude desktop app or Claude Code (both claude.exe) is running."""
+    try:
+        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq claude.exe", "/NH"], capture_output=True,
+                             text=True, timeout=5, creationflags=0x08000000).stdout  # CREATE_NO_WINDOW
+        return "claude.exe" in out.lower()
+    except Exception:
+        return True  # if we can't tell, don't launch anything
+
+
+def open_claude():
+    """Launch the Claude desktop app (Store install first, then the classic installer, then claude.ai)."""
+    try:
+        subprocess.Popen(["explorer.exe", r"shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude"])
+        return
+    except Exception as e:
+        log("store launch failed", e)
+    exe = os.path.join(os.environ.get("LOCALAPPDATA", ""), "AnthropicClaude", "claude.exe")
+    try:
+        if os.path.exists(exe):
+            subprocess.Popen([exe])
+        else:
+            os.startfile("https://claude.ai")
+    except Exception as e:
+        log("open_claude failed", e)
 
 
 def claude_focused():
@@ -257,6 +287,7 @@ class Pet:
         self.press = None
         self.drag_hist = collections.deque()
         self.fx = self.fy = self.vx = self.vy = 0.0
+        self.swing = 0.0
         self.grav = "bottom"
 
         self.menu = tk.Menu(root, tearoff=0)
@@ -495,6 +526,15 @@ class Pet:
             self.on_click(e)
 
     def start_drag(self):
+        S = self.S
+        # start from where he is drawn so there's no jump
+        box = self.sprite_screen_box()
+        if box:
+            self.fx, self.fy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+        else:
+            px, py = self.root.winfo_pointerxy()
+            self.fx, self.fy = px, py + 4 * S
+        self.swing = 0.0
         self.mode = "drag"
         self.drag_hist.clear()
         self.particles = []
@@ -506,12 +546,11 @@ class Pet:
 
     def throw(self):
         now = time.time()
-        hist = [h for h in self.drag_hist if now - h[0] < 0.12]
-        vx = vy = 0.0
-        if len(hist) >= 2 and hist[-1][0] - hist[0][0] > 0.015:
-            dt = hist[-1][0] - hist[0][0]
-            vx = (hist[-1][1] - hist[0][1]) / dt
-            vy = (hist[-1][2] - hist[0][2]) / dt
+        px, py = self.root.winfo_pointerxy()
+        self.drag_hist.append((now, px, py))  # include the exact release point
+        vx, vy = self.drag_velocity(0.09)
+        if vx == 0.0 and vy == 0.0:
+            vx, vy = self.drag_velocity(0.2)
         cap = 5000 * self.S / 5
         sp = math.hypot(vx, vy)
         if sp > cap:
@@ -528,6 +567,15 @@ class Pet:
         self.mode = "fall"
         self.particles = []
         self.set_hit(None)
+
+    def drag_velocity(self, window):
+        """average pointer velocity over the last `window` seconds"""
+        now = time.time()
+        hist = [h for h in self.drag_hist if now - h[0] <= window]
+        if len(hist) >= 2 and hist[-1][0] - hist[0][0] > 0.012:
+            dt = hist[-1][0] - hist[0][0]
+            return (hist[-1][1] - hist[0][1]) / dt, (hist[-1][2] - hist[0][2]) / dt
+        return 0.0, 0.0
 
     def land(self, edge):
         now = time.time()
@@ -557,13 +605,19 @@ class Pet:
         self.drag_hist.append((now, px, py))
         while self.drag_hist and now - self.drag_hist[0][0] > 0.2:
             self.drag_hist.popleft()
-        # held by the top of his head
-        self.fx, self.fy = px, py + 4 * S
+        # held by the top of his head; ease toward the cursor so he glides instead of snapping
+        k = 1 - math.exp(-dt * 28)
+        self.fx += (px - self.fx) * k
+        self.fy += (py + 4 * S - self.fy) * k
+        # body swings behind your hand when you move him sideways
+        vx, _ = self.drag_velocity(0.06)
+        target = max(-3.0 * S, min(3.0 * S, -vx * S / 450))
+        self.swing += (target - self.swing) * min(1.0, dt * 10)
         F = self.FW
         self.place(F, F, int(self.fx - F / 2), int(self.fy - F / 2))
         self.canvas.delete("all")
-        wig = math.sin(self.t * 24) * S * 0.8
-        self.free = ("bottom", F / 2 + wig, F / 2)
+        wig = math.sin(self.t * 15) * S * 0.45
+        self.free = ("bottom", F / 2 + self.swing + wig, F / 2)
         self.draw_body(0, 0, "squirm", 0, "flail", int(self.t * 16) % 2, blush=True)
         self.free = None
         if random.random() < 0.12:
@@ -578,10 +632,10 @@ class Pet:
         S = self.S
         l, t, r, b = work_area()
         gx, gy = {"bottom": (0, 1), "top": (0, -1), "left": (-1, 0), "right": (1, 0)}[self.grav]
-        G = 4200 * S / 5
+        G = 3300 * S / 5
         self.vx += gx * G * dt
         self.vy += gy * G * dt
-        drag = max(0.0, 1 - 0.5 * dt)
+        drag = max(0.0, 1 - 0.35 * dt)
         self.vx *= drag
         self.vy *= drag
         self.fx += self.vx * dt
@@ -1070,7 +1124,7 @@ class Pet:
                 self.hit.lift()
         except Exception as e:
             log("tick error", repr(e))
-        self.root.after(33, self.tick)
+        self.root.after(15 if self.mode in ("drag", "fall", "alert") else 33, self.tick)
 
 
 def main():
@@ -1102,6 +1156,12 @@ def main():
         ctypes.windll.user32.SetForegroundWindow(prev_fg)
     Pet(root, q)
     log("clawd started")
+
+    def ensure_claude():
+        if not claude_running():
+            log("Claude not running - opening it")
+            open_claude()
+    threading.Thread(target=ensure_claude, daemon=True).start()
     root.mainloop()
 
 
