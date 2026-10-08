@@ -249,6 +249,7 @@ class Pet:
         self.hover, self.last_hover, self.next_heart = False, 0, 0
         self.away_until = 0
         self.after_alert = None
+        self.pending_alert = None  # notification waiting to be delivered
         self.last = now
         self.t = 0.0
         self.tick()
@@ -396,6 +397,11 @@ class Pet:
             focus_claude()
             self.leave_alert("on it!")
             return
+        if self.pending_alert is not None and _e is not None:
+            focus_claude()
+            self.pending_alert = None
+            self.say("on it!", 1.2)
+            return
         self.jv = 9.0 * self.S
         self.pgoal = self.FULL
         self.say(random.choice(LINES_CLICK), 1.8)
@@ -445,9 +451,25 @@ class Pet:
                 return
             log("msg", cmd, detail)
             if cmd == "alert":
-                if not claude_focused():  # you're already looking at Claude
-                    self.start_alert(detail)
+                if claude_focused():  # you're already looking at Claude
+                    continue
+                if self.mode == "alert":
+                    self.alert_detail = (detail or "").strip()[:22] or self.alert_detail
+                    self.alert_leaving = False
+                else:
+                    if self.mode == "away":
+                        self.come_back()
+                    # idle: hide first, then drop in at the top (or tell you in place if you're petting it)
+                    self.pending_alert = detail or ""
+                    self.pending_t0 = time.time()
+                    self.pending_edge = None
+                    self.action = None
+                    self.sleeping = False
+                    self.wave = False
+                    self.target = self.pos
             elif cmd == "clear":
+                if self.pending_alert is not None and time.time() - self.pending_t0 > 1.5:
+                    self.pending_alert = None
                 if self.mode == "alert" and time.time() - self.alert_t0 > 1.5:
                     self.leave_alert("thanks!")
             elif cmd == "done":
@@ -512,8 +534,6 @@ class Pet:
         S = self.S
         sw = ctypes.windll.user32.GetSystemMetrics(0)
         self.place(self.AW, self.AH, sw // 2 - self.AW // 2, 0)
-        if now - self.alert_t0 > 180:
-            self.leave_alert("I'll wait...")
         if not self.alert_leaving and now > getattr(self, "next_focus_check", 0):
             self.next_focus_check = now + 0.25
             if claude_focused():  # you switched to Claude - job done
@@ -642,7 +662,7 @@ class Pet:
     def sprite_screen_box(self):
         S = self.S
         top = self.CH - self.p - self.jump
-        hand_y = max(top + 4 * S, self.CH - 2 * S - min(0, self.p))
+        hand_y = min(top + 4 * S, self.CH - 2 * S - min(0, self.p))
         y0 = min(top, hand_y)
         y1 = min(self.CH, max(top + 10 * S, hand_y + 2 * S))
         if y1 <= y0:
@@ -677,12 +697,33 @@ class Pet:
         elif self.hover and now - self.last_hover > 0.08:
             self.hover = False
             self.action = None
-            self.bubble = None
+            if self.pending_alert is None:
+                self.bubble = None
             self.pgoal = self.EYES
             self.sink_fast_until = now + 0.6
             self.next_action = now + random.uniform(1.5, 3)
 
-        if not self.hover:
+        if self.pending_alert is not None:
+            if now > getattr(self, "next_focus_check", 0):
+                self.next_focus_check = now + 0.25
+                if claude_focused():
+                    self.pending_alert = None
+        if self.pending_alert is not None:
+            pa = self.pending_alert
+            if self.hover:
+                # you're playing with it: tell you right here
+                lines = ["psst! Claude needs", "your permission"] + (["-> " + pa] if pa else []) + ["(click me)"]
+                self.bubble = (lines, now + 0.5)
+            else:
+                # duck out of sight, then pop up at the top of the screen
+                self.pgoal = self.HIDE
+                self.sink_fast_until = now + 0.3
+                self.target = self.pos
+                if self.p <= self.HIDE + 1:
+                    self.pending_alert = None
+                    self.start_alert(pa)
+                    return
+        elif not self.hover:
             if self.action in ("peek", "popup", "sleep", "cheer") and now > self.action_until:
                 self.action = None
                 self.wave = False
@@ -762,6 +803,9 @@ class Pet:
         if self.p > self.HIDE + 1 or not gripping:
             self.draw_body(self.GX, top, eyes, self.look if eyes == "open" else 0, arms, legs_frame,
                            blush=self.hover or self.action == "cheer")
+        if self.pending_alert is not None and self.hover and int(self.t * 3) % 2 == 0:
+            self.rect(self.GX + 15 * S, top + 0 * S, S, 3 * S, "R")
+            self.rect(self.GX + 15 * S, top + 4 * S, S, S, "R")
         # bubble
         if self.bubble:
             lines, until = self.bubble
