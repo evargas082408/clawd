@@ -6,10 +6,15 @@ Clawd - a tiny pixel Claude critter that lives on the edges of your screen.
 - Hover it to pet it (happy eyes + hearts). Click it to make it hop.
 - When Claude Code needs your permission it drops down from the top of the
   screen (by the camera) and dangles there until you deal with it.
+- When the Claude app opens (or a new project starts) it leaps onto the app's
+  input box and perches above the Send button. Drag it off to send it back.
+- Drop it in the middle of the screen while Claude is closed and a window grows
+  out of it as it opens the app.
 - Right-click for a menu.
 
 Controlled over localhost TCP by notify.py (called from Claude Code hooks).
 """
+import base64
 import collections
 import ctypes
 import math
@@ -86,6 +91,9 @@ def set_dpi_aware():
 
 class RECT(ctypes.Structure):
     _fields_ = [("l", ctypes.c_long), ("t", ctypes.c_long), ("r", ctypes.c_long), ("b", ctypes.c_long)]
+
+
+ctypes.windll.user32.GetForegroundWindow.restype = ctypes.c_void_p
 
 
 def work_area():
@@ -186,6 +194,68 @@ def claude_focused():
         return False
 
 
+def _hwnd_title(h):
+    user32 = ctypes.windll.user32
+    n = user32.GetWindowTextLengthW(ctypes.c_void_p(h))
+    b = ctypes.create_unicode_buffer(n + 1)
+    user32.GetWindowTextW(ctypes.c_void_p(h), b, n + 1)
+    return b.value
+
+
+def _hwnd_exe(h):
+    user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+    pid = ctypes.c_ulong()
+    user32.GetWindowThreadProcessId(ctypes.c_void_p(h), ctypes.byref(pid))
+    exe = ""
+    hp = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if hp:
+        buf = ctypes.create_unicode_buffer(520)
+        size = ctypes.c_ulong(520)
+        if kernel32.QueryFullProcessImageNameW(hp, 0, buf, ctypes.byref(size)):
+            exe = os.path.basename(buf.value).lower()
+        kernel32.CloseHandle(hp)
+    return exe
+
+
+def find_claude_window():
+    """Handle of the Claude desktop app's main window, or None."""
+    try:
+        user32 = ctypes.windll.user32
+        found = []
+        proto = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+        def cb(h, _):
+            if h and user32.IsWindowVisible(ctypes.c_void_p(h)) and _hwnd_title(h) == "Claude" \
+                    and _hwnd_exe(h) == "claude.exe":
+                found.append(h)
+                return False
+            return True
+
+        user32.EnumWindows(proto(cb), 0)
+        return found[0] if found else None
+    except Exception:
+        return None
+
+
+def window_rect(h, visible=False):
+    """(l, t, r, b) of a window; visible=True leaves out the invisible resize borders."""
+    r = RECT()
+    if visible and ctypes.windll.dwmapi.DwmGetWindowAttribute(
+            ctypes.c_void_p(h), 9, ctypes.byref(r), ctypes.sizeof(r)) == 0:  # DWMWA_EXTENDED_FRAME_BOUNDS
+        return r.l, r.t, r.r, r.b
+    if ctypes.windll.user32.GetWindowRect(ctypes.c_void_p(h), ctypes.byref(r)):
+        return r.l, r.t, r.r, r.b
+    return None
+
+
+def is_iconic(h):
+    return bool(ctypes.windll.user32.IsIconic(ctypes.c_void_p(h)))
+
+
+def foreground_is(h):
+    return bool(h) and ctypes.windll.user32.GetForegroundWindow() == h
+
+
 def no_activate(win):
     """never steal focus, never show in alt-tab"""
     try:
@@ -248,12 +318,141 @@ def serve(sock, q):
             time.sleep(0.2)
 
 
+class SendLocator:
+    """Asks Windows UI Automation where the Claude app's Send button is, through one long-lived
+    PowerShell helper (starting PowerShell is slow, querying it is quick)."""
+    SCRIPT = r'''
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+Add-Type 'using System.Runtime.InteropServices; public class ClawdDpi { [DllImport("user32.dll")] public static extern bool SetProcessDPIAware(); }'
+[ClawdDpi]::SetProcessDPIAware() | Out-Null
+$A = [System.Windows.Automation.AutomationElement]
+$cond = New-Object System.Windows.Automation.AndCondition -ArgumentList @(,[System.Windows.Automation.Condition[]]@(
+  (New-Object System.Windows.Automation.PropertyCondition($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)),
+  (New-Object System.Windows.Automation.PropertyCondition($A::NameProperty, 'Send'))))
+$condP = New-Object System.Windows.Automation.AndCondition -ArgumentList @(,[System.Windows.Automation.Condition[]]@(
+  (New-Object System.Windows.Automation.PropertyCondition($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Edit)),
+  (New-Object System.Windows.Automation.PropertyCondition($A::NameProperty, 'Prompt'))))
+while ($true) {
+  $line = [Console]::In.ReadLine()
+  if ($line -eq $null) { break }
+  $out = 'none'
+  try {
+    $root = $A::FromHandle([IntPtr][long]$line)
+    $best = $null
+    foreach ($e in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)) {
+      $r = $e.Current.BoundingRectangle
+      if ($e.Current.IsOffscreen -or $r.Width -le 0 -or $r.Height -le 0) { continue }
+      if ($best -eq $null -or $r.Y -gt $best.Y) { $best = $r }
+    }
+    if ($best -ne $null) { $out = '{0} {1} {2} {3}' -f [int]$best.X, [int]$best.Y, [int]$best.Width, [int]$best.Height }
+    else {
+      # no Send button right now: estimate where it sits, just right of the prompt box
+      $ed = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condP)
+      if ($ed -ne $null -and -not $ed.Current.IsOffscreen) {
+        $r = $ed.Current.BoundingRectangle
+        if ($r.Width -gt 0) { $out = '{0} {1} {2} {3}' -f [int]($r.X + $r.Width + $r.Height * 0.27), [int]($r.Y - $r.Height * 0.1), [int]($r.Height * 1.23), [int]($r.Height * 1.2) }
+      }
+    }
+  } catch { }
+  [Console]::Out.WriteLine($out)
+  [Console]::Out.Flush()
+}
+'''
+
+    def __init__(self):
+        self.proc = None
+
+    def _start(self):
+        enc = base64.b64encode(self.SCRIPT.encode("utf-16-le")).decode("ascii")
+        self.proc = subprocess.Popen(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", enc],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1,
+            creationflags=0x08000000)  # CREATE_NO_WINDOW
+
+    def locate(self, hwnd):
+        """screen rect (x, y, w, h) of the Send button, or None"""
+        try:
+            if self.proc is None or self.proc.poll() is not None:
+                self._start()
+            self.proc.stdin.write(f"{int(hwnd)}\n")
+            self.proc.stdin.flush()
+            line = self.proc.stdout.readline().strip()
+        except Exception as e:
+            log("locator failed", repr(e))
+            self.proc = None
+            return None
+        if not line or line == "none":
+            return None
+        try:
+            x, y, w, h = (int(v) for v in line.split())
+            return x, y, w, h
+        except ValueError:
+            return None
+
+
+class ClaudeWatcher(threading.Thread):
+    """Keeps an eye on the Claude app window (opened / closed) and, while Clawd wants to perch,
+    on where its Send button is."""
+
+    def __init__(self, q):
+        super().__init__(daemon=True)
+        self.q = q
+        self.hwnd = find_claude_window()
+        self.send = None    # Send button as (from right edge, from bottom edge, w, h) of the window
+        self.want = False   # set by the pet while perching / about to perch
+        self.force = False  # ask for a fresh look right away
+        self.locator = SendLocator()
+        self.misses = 0
+
+    def run(self):
+        last, last_size = 0.0, None
+        while True:
+            try:
+                h = find_claude_window()
+                if h and not self.hwnd:
+                    self.q.put(("claude_opened", ""))
+                elif self.hwnd and not h:
+                    self.send = None
+                    self.q.put(("claude_closed", ""))
+                self.hwnd = h
+                if h and self.want and not is_iconic(h):
+                    r = window_rect(h)
+                    size = (r[2] - r[0], r[3] - r[1]) if r else None
+                    if self.force or size != last_size or time.time() - last > (4.0 if self.send else 1.0):
+                        self.force = False
+                        sb = self.locator.locate(h)
+                        r = window_rect(h)
+                        if sb and r:
+                            self.send = (r[2] - sb[0], r[3] - sb[1], sb[2], sb[3])
+                            self.misses = 0
+                        else:  # the app's UI is sometimes mid-redraw; only give up after a few misses
+                            self.misses += 1
+                            if self.misses >= 3:
+                                self.send = None
+                        last, last_size = time.time(), size
+            except Exception as e:
+                log("watcher error", repr(e))
+            time.sleep(0.4)
+
+
+def ease_out_back(u, k=1.4):
+    u -= 1
+    return 1 + (k + 1) * u * u * u + k * u * u
+
+
+def lerp_rect(a, b, e):
+    return tuple(a[i] + (b[i] - a[i]) * e for i in range(4))
+
+
 # ---------------------------------------------------------------- the pet
 class Pet:
-    def __init__(self, root, q):
-        self.root, self.q = root, q
+    def __init__(self, root, q, watcher=None):
+        self.root, self.q, self.watcher = root, q, watcher
         dpi = root.winfo_fpixels("1i")
+        self.scale = dpi / 96
         self.S = S = max(3, round(5 * dpi / 96))
+        self.S_big, self.S_small = S, max(2, round(S * 0.5))  # tiny while resting on Claude's input box
+        self.size_target, self.next_size_step = S, 0.0
         # idle, dragged and falling all share one square window size, so grabbing / landing only
         # moves the window and never resizes it (a resize briefly exposes unpainted pixels)
         self.CW, self.CH = 34 * S, 34 * S          # canonical canvas (edge along the bottom)
@@ -263,6 +462,7 @@ class Pet:
         self.GX = (self.CW - 14 * S) // 2          # sprite x inside canonical canvas
         self.HIDE, self.HANDS, self.EYES, self.FULL = -3 * S, 0, int(4.4 * S), 10 * S
         self.font = tkfont.Font(family="Consolas", size=9, weight="bold")
+        self.panel_font = tkfont.Font(family="Consolas", size=15, weight="bold")
 
         self.canvas = tk.Canvas(root, bg=KEY, highlightthickness=0, bd=0)
         self.canvas.pack(fill="both", expand=True)
@@ -297,6 +497,7 @@ class Pet:
         self.startup_var = tk.BooleanVar(value=startup_enabled())
         self.menu.add_command(label="Pet Clawd", command=lambda: self.q.put(("hi", "")))
         self.menu.add_command(label="Test permission alert", command=lambda: self.q.put(("alert", "Bash")))
+        self.menu.add_command(label="Sit on Claude's input box", command=lambda: self.q.put(("perch", "")))
         self.menu.add_command(label="Hide for 10 minutes", command=self.go_away)
         self.menu.add_checkbutton(label="Start with Windows", variable=self.startup_var, command=self.toggle_startup)
         self.menu.add_separator()
@@ -323,6 +524,13 @@ class Pet:
         self.away_until = 0
         self.after_alert = None
         self.pending_alert = None  # notification waiting to be delivered
+        self.perched = False        # sitting on the Claude app's input box
+        self.perch_pt = None        # screen point on top of the input box, above Send
+        self.perch_wanted_until = 0
+        self.leap = None            # arc from wherever he is onto the input box
+        self.sm = None              # "summon Claude" sequence
+        self.pan = None             # the window that grows out of him
+        self.panel = self.panel_cv = None
         self.last = now
         self.t = 0.0
         self.tick()
@@ -336,6 +544,8 @@ class Pet:
         return (self.CW, self.CH) if self.edge in ("top", "bottom") else (self.CH, self.CW)
 
     def window_xy(self):
+        if self.perched and self.perch_pt:  # standing on Claude's input box
+            return int(self.perch_pt[0] - self.CW / 2), int(self.perch_pt[1] - self.CH)
         l, t, r, b = work_area()
         half = self.CW // 2
         if self.edge == "bottom":
@@ -539,6 +749,9 @@ class Pet:
             self.fx, self.fy = px, py + 4 * S
         self.swing = 0.0
         self.slide = 0.0
+        self.perched = False
+        self.perch_wanted_until = 0
+        self.set_size(self.S_big)  # grows back in your hand
         self.mode = "drag"
         self.drag_hist.clear()
         self.particles = []
@@ -564,6 +777,10 @@ class Pet:
         l, t, r, b = work_area()
         nx, ny = (self.fx - l) / (r - l), (self.fy - t) / (b - t)
         if 0.25 < nx < 0.75 and 0.25 < ny < 0.75:
+            # dropped (not flung) in the middle while the Claude app isn't open: open it
+            if self.watcher and not self.watcher.hwnd and math.hypot(vx, vy) < 1800 * self.S / 5:
+                self.start_summon()
+                return
             self.grav = "bottom"
         else:
             d = {"left": self.fx - l, "right": r - self.fx, "top": self.fy - t, "bottom": b - self.fy}
@@ -585,6 +802,8 @@ class Pet:
         now = time.time()
         l, t, r, b = work_area()
         self.mode = "idle"
+        self.perched = False
+        self.set_size(self.S_big, now_=True)
         self.edge = edge
         L = self.edge_len()
         along = (self.fx - l) if edge in ("top", "bottom") else (self.fy - t)
@@ -683,6 +902,309 @@ class Pet:
         self.free = None
         self.draw_particles(dt)
 
+    # ---------- size (pixel scale)
+    def apply_size(self, s):
+        """switch pixel scale, keeping his height/jump proportional so nothing jumps"""
+        k = s / self.S
+        self.S = s
+        self.GX = (self.CW - 14 * s) // 2
+        self.HIDE, self.EYES, self.FULL = -3 * s, int(4.4 * s), 10 * s
+        self.p *= k
+        self.pgoal *= k
+        self.jump *= k
+        self.jv *= k
+
+    def set_size(self, s, now_=False):
+        self.size_target = s
+        if now_:
+            while self.S != s:
+                self.apply_size(self.S + (1 if s > self.S else -1))
+
+    def step_size(self, now):
+        if self.S != self.size_target and now >= self.next_size_step:
+            self.apply_size(self.S + (1 if self.size_target > self.S else -1))
+            self.next_size_step = now + 0.07  # one pixel-size step at a time
+
+    # ---------- perching on the Claude app's input box
+    def perch_point(self):
+        """screen point on the top edge of Claude's input box, above the Send button (or None)"""
+        w = self.watcher
+        if not w or not w.hwnd or not w.send or is_iconic(w.hwnd):
+            return None
+        r = window_rect(w.hwnd)
+        if not r:
+            return None
+        dx, dy, bw, bh = w.send
+        return r[2] - dx + bw / 2, r[3] - dy - 7.5 * self.scale
+
+    def request_perch(self, secs=25):
+        self.perch_wanted_until = time.time() + secs
+        if self.watcher:
+            self.watcher.want = True
+            self.watcher.force = True
+
+    def unperch(self, fall=True):
+        S = self.S
+        pt = self.perch_pt
+        visible = self.mode == "idle" and self.p > self.HIDE + S
+        self.perched = False
+        self.set_size(self.S_big)
+        if fall and visible and pt:  # hop off and drop to the bottom of the screen
+            top = self.CH - self.p - self.jump
+            self.fx, self.fy = pt[0], pt[1] - self.CH + top + 5 * S
+            self.vx, self.vy = 0.0, -3.0 * S
+            self.grav = "bottom"
+            self.mode = "fall"
+            self.set_hit(None)
+        else:
+            l, t, r, b = work_area()
+            m = self.CW * 0.55
+            self.edge = "bottom"
+            self.pos = self.target = max(m, min(r - l - m, (pt[0] if pt else (l + r) / 2) - l))
+            self.p, self.pgoal = float(self.HIDE), float(self.HANDS)
+            self._geom = None
+
+    def start_leap(self):
+        S = self.S
+        pt = self.perch_point()
+        if not pt:
+            return False
+        if self.mode == "idle":
+            box = self.sprite_screen_box()
+            if box:
+                x0, y0 = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+            else:  # hidden behind an edge: jump out of it
+                wx, wy = self.window_xy()
+                ax, ay = self.Tp(self.GX + 7 * S, self.CH)
+                x0, y0 = wx + ax, wy + ay
+        else:
+            x0, y0 = self.fx, self.fy
+        self.perch_pt = pt
+        tx, ty = pt[0], pt[1] - 5 * S
+        dist = math.hypot(tx - x0, ty - y0)
+        self.leap = {"x0": x0, "y0": y0, "t0": time.time(), "T": max(0.6, min(1.3, 0.55 + dist / 2600)),
+                     "H": max(140 * self.scale, 0.3 * dist)}
+        self.fx, self.fy = x0, y0
+        self.set_size(self.S_small)  # shrinks step by step during the jump
+        self.mode = "leap"
+        self.perch_wanted_until = 0
+        self.hover = self.sleeping = self.wave = False
+        self.action = self.bubble = self.pending_edge = None
+        self.slide = 0.0
+        self.particles = []
+        self.set_hit(None)
+        return True
+
+    def tick_leap(self, now, dt):
+        S = self.S
+        lp = self.leap
+        pt = self.perch_point()
+        if pt:
+            self.perch_pt = pt  # follow the window if it moves mid-jump
+        elif not (self.watcher and self.watcher.hwnd):  # Claude closed mid-air
+            self.vx = self.vy = 0.0
+            self.grav = "bottom"
+            self.mode = "fall"
+            return
+        tx, ty = self.perch_pt[0], self.perch_pt[1] - 5 * S
+        u = min(1.0, (now - lp["t0"]) / lp["T"])
+        e = u * u * (3 - 2 * u)
+        self.fx = lp["x0"] + (tx - lp["x0"]) * e
+        self.fy = lp["y0"] + (ty - lp["y0"]) * u - lp["H"] * 4 * u * (1 - u)
+        if u >= 1:
+            self.arrive_perch(now)
+            return
+        F = self.FW
+        self.place(F, F, int(self.fx - F / 2), int(self.fy - F / 2))
+        self.canvas.delete("all")
+        self.free = ("bottom", F / 2, F / 2)
+        tuck = u > 0.75  # arms down, legs out for the landing
+        self.draw_body(0, 0, "happy", 0, "normal" if tuck else "flail", -1 if tuck else int(self.t * 14) % 2,
+                       blush=True)
+        self.free = None
+        self.draw_particles(dt)
+
+    def arrive_perch(self, now):
+        self.set_size(self.S_small, now_=True)
+        self.perched = True
+        self.mode = "idle"
+        self.edge = "bottom"
+        self.p, self.pgoal = float(self.FULL), float(self.EYES)  # (in small units now)
+        self.jump, self.jv = 0.0, 0.0
+        self.action, self.action_until = "landed", now + 0.6
+        self.next_action = now + random.uniform(3, 6)
+        self.hover = False
+        self.particles = []
+        self._geom = None
+        for _ in range(3):
+            self.spawn("spark")
+
+    def choose_perched_action(self, now):
+        S = self.S
+        r = random.random()
+        self.wave = self.sleeping = False
+        self.target = self.pos
+        if r < 0.45:
+            self.action, self.pgoal = "peek", self.EYES
+            self.action_until = now + random.uniform(3, 6)
+        elif r < 0.65:
+            self.action, self.pgoal = "popup", self.FULL
+            self.wave = random.random() < 0.6
+            self.action_until = now + random.uniform(1.8, 3.0)
+        elif r < 0.8:
+            self.action, self.pgoal = "duck", self.HANDS  # just his hands on the box
+            self.action_until = now + random.uniform(2, 4)
+        else:
+            self.action, self.pgoal = "sleep", int(3.2 * S)
+            self.sleeping = True
+            self.action_until = now + random.uniform(6, 10)
+        self.next_action = self.action_until + random.uniform(1.5, 3.5)
+
+    # ---------- summoning the Claude app: a window grows out of Clawd
+    def start_summon(self):
+        self.set_size(self.S_big, now_=True)
+        self.mode = "summon"
+        self.sm = {"phase": "charge", "t0": time.time()}
+        self.particles = []
+        self.set_hit(None)
+        self.say("opening Claude!", 1.6)
+
+    def tick_summon(self, now, dt):
+        S = self.S
+        sm = self.sm
+        l, t, r, b = work_area()
+        if sm["phase"] == "charge":  # coast to a stop and wind up
+            k = math.exp(-dt * 8)
+            self.vx *= k
+            self.vy *= k
+            self.fx += self.vx * dt
+            self.fy += self.vy * dt
+            if now - sm["t0"] > 0.35:
+                open_claude()
+                self.start_panel((self.fx - 7 * S, self.fy - 5 * S, self.fx + 7 * S, self.fy + 5 * S))
+                sm.update(phase="ride", t_open=now)
+        elif sm["phase"] == "ride":  # stand on top of the growing window
+            if self.pan:
+                x0, y0, x1, y1 = self.pan["cur"]
+                tx, ty = (x0 + x1) / 2, max(t + 6 * S, y0 - 5 * S)
+                k = 1 - math.exp(-dt * 16)
+                self.fx += (tx - self.fx) * k
+                self.fy += (ty - self.fy) * k
+                if self.pan["phase"] == "hold" and now - sm["t_open"] > 16:  # it never showed up
+                    self.pan_fade()
+                    self.say("hmm, Claude\ndidn't open", 2.2)
+                    sm.update(phase="wait", t_wait=now - 9)
+            if sm["phase"] == "ride" and (self.pan is None or self.pan["phase"] in ("morph", "fade")):
+                sm.update(phase="wait", t_wait=now)
+        elif sm["phase"] == "wait":  # Claude is open: hop onto its input box as soon as it's there
+            if self.perch_point() and self.start_leap():
+                return
+            if now - sm["t_wait"] > 12:
+                self.vx = self.vy = 0.0
+                self.grav = "bottom"
+                self.mode = "fall"
+                return
+        F = self.FW
+        self.place(F, F, int(self.fx - F / 2), int(self.fy - F / 2))
+        self.canvas.delete("all")
+        bob = math.sin(self.t * 4) * S * 0.3
+        self.free = ("bottom", F / 2, F / 2 + bob)
+        self.draw_body(0, 0, "happy", 0, "wave", -1, blush=True)
+        self.free = None
+        if random.random() < 0.08:
+            self.particles.append({"x": F / 2 + random.uniform(-6, 6) * S, "y": F / 2 + random.uniform(-4, 2) * S,
+                                   "vx": random.uniform(-1, 1) * S * 2, "vy": -random.uniform(4, 7) * S,
+                                   "life": 0.8, "kind": "spark", "abs": True})
+        if self.bubble and now < self.bubble[1]:
+            self.bubble_at(self.bubble[0], F / 2, F / 2 - 6 * S, "up", F, F)
+        self.draw_particles(dt)
+
+    def start_panel(self, rect):
+        l, t, r, b = work_area()
+        if self.panel is None:
+            win = tk.Toplevel(self.root)
+            win.overrideredirect(True)
+            win.title("clawd-pet")
+            win.attributes("-topmost", True)
+            win.attributes("-transparentcolor", KEY)
+            win.config(bg=KEY)
+            no_activate(win)
+            cv = tk.Canvas(win, bg=KEY, highlightthickness=0, bd=0)
+            cv.pack(fill="both", expand=True)
+            self.panel, self.panel_cv = win, cv
+        W, H = r - l, b - t
+        self.panel.geometry(f"{W}x{H}+{l}+{t}")  # one full-screen, mostly see-through window: never resized
+        self.panel.attributes("-alpha", 1.0)
+        self.panel.deiconify()
+        self.root.lift()   # Clawd stays in front of the window he's pulling out
+        self.hit.lift()
+        tw, th = int(W * 0.7), int(H * 0.76)
+        to = (l + (W - tw) // 2, t + (H - th) // 2, l + (W + tw) // 2, t + (H + th) // 2)
+        self.pan = {"phase": "grow", "t0": time.time(), "from": rect, "to": to, "cur": rect, "origin": (l, t)}
+
+    def pan_fade(self):
+        if self.pan and self.pan["phase"] != "fade":
+            self.pan.update(phase="fade", t0=time.time())
+
+    def tick_panel(self, now):
+        pn = self.pan
+        if pn is None:
+            return
+        el = now - pn["t0"]
+        if pn["phase"] == "grow":
+            u = min(1.0, el / 0.6)
+            pn["cur"] = lerp_rect(pn["from"], pn["to"], ease_out_back(u))
+            if u >= 1:
+                pn.update(phase="hold", t0=now)
+        elif pn["phase"] == "hold":  # wait for the real Claude window to show up
+            pn["cur"] = pn["to"]
+            h = self.watcher.hwnd if self.watcher else None
+            if h and not is_iconic(h):
+                rr = window_rect(h, visible=True)
+                if rr and rr[2] - rr[0] > 300 and rr[3] - rr[1] > 200:
+                    pn.update(phase="morph", t0=now, **{"from": pn["cur"], "to": rr})
+                    self.request_perch(30)
+        elif pn["phase"] == "morph":  # line up exactly with the real window...
+            u = min(1.0, el / 0.3)
+            pn["cur"] = lerp_rect(pn["from"], pn["to"], u * u * (3 - 2 * u))
+            if u >= 1:
+                pn.update(phase="fade", t0=now)
+        elif pn["phase"] == "fade":  # ...then fade away to reveal it
+            u = min(1.0, el / 0.35)
+            self.panel.attributes("-alpha", max(0.0, 1 - u))
+            if u >= 1:
+                self.panel.withdraw()
+                self.pan = None
+                return
+        self.draw_panel(pn["cur"])
+
+    def draw_panel(self, rect):
+        S, cv = self.S, self.panel_cv
+        ox, oy = self.pan["origin"]
+        x0, y0, x1, y1 = rect[0] - ox, rect[1] - oy, rect[2] - ox, rect[3] - oy
+        cv.delete("all")
+        w, h = x1 - x0, y1 - y0
+        if w < 4 or h < 4:
+            return
+        c = min(S, w / 4, h / 4)  # chunky pixel corners
+        bw = max(2, S // 2)
+
+        def chunky(a0, b0, a1, b1, col, cc):
+            cv.create_rectangle(a0 + cc, b0, a1 - cc, b1, fill=col, width=0)
+            cv.create_rectangle(a0, b0 + cc, a1, b1 - cc, fill=col, width=0)
+
+        chunky(x0, y0, x1, y1, C["O"], c)
+        chunky(x0 + bw, y0 + bw, x1 - bw, y1 - bw, "#262624", max(0, c - bw))
+        if h > 14 * S:  # title bar strip
+            cv.create_rectangle(x0 + bw + c, y0 + bw, x1 - bw - c, y0 + 5 * S, fill="#30302E", width=0)
+        if w > 44 * S and h > 26 * S and self.pan["phase"] in ("grow", "hold"):
+            cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+            cv.create_text(cx, cy - 3 * S, text="opening Claude", font=self.panel_font, fill=C["O"])
+            for i in range(3):  # bouncing pixel dots
+                dy = max(0.0, math.sin(self.t * 7 - i * 0.8)) * 1.5 * S
+                dx = cx + (i - 1) * 3 * S
+                cv.create_rectangle(dx - S / 2, cy + 3 * S - dy, dx + S / 2, cy + 4 * S - dy, fill=C["O"], width=0)
+
     def on_menu(self, e):
         try:
             self.menu.tk_popup(e.x_root, e.y_root)
@@ -757,6 +1279,22 @@ class Pet:
                     self.come_back()
                 if self.mode == "idle":
                     self.on_click(None)
+            elif cmd in ("claude_opened", "session", "perch"):
+                # Claude app opened / new project / menu: hop onto the app's input box
+                if self.perched and cmd == "session" and self.mode == "idle":
+                    self.jv = 7.0 * self.S
+                    for _ in range(4):
+                        self.spawn("spark")
+                elif cmd == "claude_opened" or (self.watcher and self.watcher.hwnd):
+                    if self.mode == "away":
+                        self.come_back()
+                    self.request_perch()
+            elif cmd == "claude_closed":
+                self.perch_wanted_until = 0
+                if self.perched and self.mode == "idle":
+                    self.unperch(fall=True)
+                elif self.perched:
+                    self.perched = False
             elif cmd == "quit":
                 self.root.destroy()
 
@@ -785,6 +1323,7 @@ class Pet:
     def start_alert(self, detail):
         if self.mode == "away":
             self.come_back()
+        self.set_size(self.S_big, now_=True)
         now = time.time()
         self.alert_t0 = now
         self.alert_detail = (detail or "").strip()[:22]
@@ -821,10 +1360,14 @@ class Pet:
         self.alert_drop += self.alert_v * dt
         if self.alert_leaving and self.alert_drop < -15 * S and now - self.alert_leave_t > 1.0:
             self.mode = "idle"
-            self.edge = "top"
-            l, t, r, b = work_area()
-            self.pos = sw // 2 - l
-            self.target = self.pos
+            if self.perched:  # back to his spot on Claude's input box
+                self.edge = "bottom"
+                self.set_size(self.S_small, now_=True)
+            else:
+                self.edge = "top"
+                l, t, r, b = work_area()
+                self.pos = sw // 2 - l
+                self.target = self.pos
             self.p, self.pgoal = float(self.HIDE), float(self.EYES)
             self.next_action = now + 3
             self.action = None
@@ -902,6 +1445,8 @@ class Pet:
         return random.uniform(m, L - m)
 
     def choose_action(self, now):
+        if self.perched:
+            return self.choose_perched_action(now)
         S = self.S
         r = random.random()
         self.wave = False
@@ -950,12 +1495,29 @@ class Pet:
 
     def tick_idle(self, now, dt):
         S = self.S
+        perch_visible = False
+        if self.perched:
+            pt = self.perch_point()
+            if pt:
+                self.perch_pt = pt  # follows the window around
+            if not (self.watcher and self.watcher.hwnd):
+                self.unperch(fall=True)
+                if self.mode != "idle":
+                    return
+            else:
+                # only show himself while you're actually looking at Claude
+                perch_visible = pt is not None and foreground_is(self.watcher.hwnd)
+        elif (now < self.perch_wanted_until and not self.hover and self.pending_alert is None and self.watcher
+              and self.watcher.hwnd and foreground_is(self.watcher.hwnd) and self.perch_point()):
+            if self.start_leap():
+                return
         # hover
         box = self.sprite_screen_box()
         self.set_hit(box)
         px, py = self.root.winfo_pointerxy()
         m = 2 * S if self.hover else 0  # a little stickier once you're petting him
         inside = box is not None and box[0] - m <= px <= box[2] + m and box[1] - m <= py <= box[3] + m
+        inside = inside and (perch_visible or not self.perched)
         if inside:
             if not self.hover:
                 self.hover = True
@@ -1002,13 +1564,25 @@ class Pet:
                     self.pending_alert = None
                     self.start_alert(pa)
                     return
+        elif not self.hover and self.perched and not perch_visible:
+            # you switched away from Claude: duck down behind the input box
+            self.pgoal = self.HIDE
+            self.sink_fast_until = now + 0.2
+            self.action = None
+            self.sleeping = self.wave = False
+            self.next_action = now + 1.2
         elif not self.hover:
-            if self.action in ("peek", "popup", "sleep", "cheer", "landed") and now > self.action_until:
+            if self.perched and self.pgoal == self.HIDE:  # you're back: peek over the box again
+                self.pgoal = self.EYES
+            if self.action in ("peek", "popup", "sleep", "cheer", "landed", "duck") and now > self.action_until:
                 landed = self.action == "landed"
                 self.action = None
                 self.wave = False
                 self.sleeping = False
-                self.pgoal = self.HANDS if landed else random.choice([self.HANDS, self.EYES])
+                if self.perched:
+                    self.pgoal = self.EYES
+                else:
+                    self.pgoal = self.HANDS if landed else random.choice([self.HANDS, self.EYES])
             if now >= self.next_action and self.pending_edge is None:
                 self.choose_action(now)
 
@@ -1142,7 +1716,15 @@ class Pet:
         self.t += dt
         try:
             self.handle_messages()
-            if self.mode == "alert":
+            if self.watcher:
+                self.watcher.want = self.perched or self.mode in ("leap", "summon") or now < self.perch_wanted_until
+            self.tick_panel(now)
+            self.step_size(now)
+            if self.mode == "leap":
+                self.tick_leap(now, dt)
+            elif self.mode == "summon":
+                self.tick_summon(now, dt)
+            elif self.mode == "alert":
                 self.tick_alert(now, dt)
             elif self.mode == "drag":
                 self.tick_drag(now, dt)
@@ -1158,9 +1740,14 @@ class Pet:
                 self.root.attributes("-topmost", True)
                 self.hit.attributes("-topmost", True)
                 self.hit.lift()
+        except tk.TclError as e:
+            if "destroyed" in str(e):  # quitting: stop quietly
+                return
+            log("tick error", repr(e))
         except Exception as e:
             log("tick error", repr(e))
-        self.root.after(15 if self.mode in ("drag", "fall", "alert") else 33, self.tick)
+        fast = self.mode in ("drag", "fall", "alert", "leap", "summon") or self.pan is not None
+        self.root.after(15 if fast else 33, self.tick)
 
 
 def main():
@@ -1190,7 +1777,9 @@ def main():
     root.update_idletasks()
     if prev_fg:
         ctypes.windll.user32.SetForegroundWindow(prev_fg)
-    Pet(root, q)
+    watcher = ClaudeWatcher(q)
+    Pet(root, q, watcher)
+    watcher.start()
     log("clawd started")
 
     def ensure_claude():

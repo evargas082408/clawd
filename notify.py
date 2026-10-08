@@ -1,4 +1,4 @@
-"""Poke Clawd from a Claude Code hook: notify.py alert|done|clear|hi|quit
+"""Poke Clawd from a Claude Code hook: notify.py alert|done|clear|session|hi|quit
 Starts the pet if it isn't running (for alert/done/hi)."""
 import json
 import os
@@ -37,7 +37,7 @@ def main():
     try:
         send(f"{cmd}|{detail}\n")
     except OSError:
-        if cmd in ("alert", "done", "hi"):
+        if cmd in ("alert", "done", "hi", "session"):
             exe = sys.executable
             if exe.lower().endswith("python.exe"):
                 exe = exe[:-10] + "pythonw.exe"

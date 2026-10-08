@@ -80,6 +80,23 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:/Path/To/Python/python.exe",
+            "args": [
+              "C:/path/to/claude-pet/notify.py",
+              "session"
+            ],
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }
