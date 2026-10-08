@@ -715,7 +715,8 @@ class Pet:
             self.pending_alert = None
             self.say("on it!", 1.2)
             return
-        self.jv = 9.0 * self.S
+        if self.jump < 1.5 * self.S:  # only hop from the ground, so spam-clicking can't stack hops
+            self.jv = 9.0 * self.S
         self.pgoal = self.FULL
         self.say(random.choice(LINES_CLICK), 1.8)
         for _ in range(4):
@@ -1633,6 +1634,9 @@ class Pet:
         self.jump += self.jv * dt * 3
         if self.jump <= 0:
             self.jump, self.jv = 0.0, 0.0
+        ceiling = max(0.0, self.CH - self.p - 12 * S)  # never jump out of his own window
+        if self.jump > ceiling:
+            self.jump, self.jv = ceiling, min(self.jv, 0.0)
 
         # blinking
         if now > self.next_blink:
