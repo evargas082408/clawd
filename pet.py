@@ -28,7 +28,7 @@ PORT = 47863
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOG = os.path.join(HERE, "pet.log")
 
-KEY = "#010101"  # transparent colour key
+KEY = "#000000"  # transparent colour key: pure black, so any not-yet-painted area is see-through too
 C = {
     "O": "#D97757",  # claude orange
     "D": "#B4593B",  # shade
@@ -254,16 +254,19 @@ class Pet:
         self.root, self.q = root, q
         dpi = root.winfo_fpixels("1i")
         self.S = S = max(3, round(5 * dpi / 96))
-        self.CW, self.CH = 32 * S, 34 * S          # canonical canvas (edge along the bottom)
+        # idle, dragged and falling all share one square window size, so grabbing / landing only
+        # moves the window and never resizes it (a resize briefly exposes unpainted pixels)
+        self.CW, self.CH = 34 * S, 34 * S          # canonical canvas (edge along the bottom)
         self.AW, self.AH = 46 * S, 34 * S          # alert canvas
-        self.FW = 34 * S                           # free-floating canvas (dragged / thrown)
+        self.FW = self.CW                          # free-floating canvas (dragged / thrown)
         self.free = None                           # (orientation, cx, cy) while floating
         self.GX = (self.CW - 14 * S) // 2          # sprite x inside canonical canvas
         self.HIDE, self.HANDS, self.EYES, self.FULL = -3 * S, 0, int(4.4 * S), 10 * S
         self.font = tkfont.Font(family="Consolas", size=9, weight="bold")
 
         self.canvas = tk.Canvas(root, bg=KEY, highlightthickness=0, bd=0)
-        self.canvas.pack()
+        self.canvas.pack(fill="both", expand=True)
+        root.pack_propagate(False)
         self.canvas.bind("<Button-1>", self.on_click)
         self.canvas.bind("<Button-3>", self.on_menu)
         self._geom = None
@@ -347,8 +350,8 @@ class Pet:
         g = f"{w}x{h}+{x}+{y}"
         if g != self._geom:
             self._geom = g
+            self.root.geometry(g)  # resize/move the window first, in one step
             self.canvas.config(width=w, height=h)
-            self.root.geometry(g)
 
     def set_hit(self, box):
         """box = screen rect (x0, y0, x1, y1), or None to park the hitbox off-screen"""
