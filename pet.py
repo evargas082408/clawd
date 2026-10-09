@@ -241,16 +241,34 @@ def claude_running():
 
 
 def open_claude():
-    """Launch the Claude desktop app (Store install first, then the classic installer, then claude.ai)."""
-    try:
-        subprocess.Popen(["explorer.exe", r"shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude"])
-        return
-    except Exception as e:
-        log("store launch failed", e)
-    exe = os.path.join(os.environ.get("LOCALAPPDATA", ""), "AnthropicClaude", "claude.exe")
-    try:
+    """Launch whichever Claude desktop install exists (classic installer, then Store), else claude.ai.
+    Only cheap file checks, so it works after a reinstall and starts instantly."""
+    local = os.environ.get("LOCALAPPDATA", "")
+    squirrel = os.path.join(local, "AnthropicClaude")
+    try:  # newest app-x.y.z build directly, skipping the launcher stub
+        apps = [d for d in os.listdir(squirrel) if d.startswith("app-")]
+        newest = max(apps, key=lambda d: [int(p) if p.isdigit() else 0 for p in d[4:].split(".")])
+        newest = os.path.join(squirrel, newest, "claude.exe")
+    except (OSError, ValueError):
+        newest = ""
+    for exe in (newest, os.path.join(squirrel, "claude.exe"),
+                os.path.join(local, "Programs", "Claude", "Claude.exe"),
+                os.path.join(os.environ.get("ProgramFiles", ""), "Claude", "Claude.exe")):
         if os.path.exists(exe):
-            subprocess.Popen([exe])
+            try:
+                subprocess.Popen([exe], close_fds=True)
+                return
+            except Exception as e:
+                log("exe launch failed", exe, e)
+    # Store install: the package folder name is the family name, whatever the reinstall gave it
+    pkgs = os.path.join(local, "Packages")
+    try:
+        fam = next((d for d in os.listdir(pkgs) if d.lower().startswith("claude_")), None)
+    except OSError:
+        fam = None
+    try:
+        if fam:
+            os.startfile(rf"shell:AppsFolder\{fam}!Claude")
         else:
             os.startfile("https://claude.ai")
     except Exception as e:
@@ -1702,12 +1720,12 @@ class Pet:
             el = now - sm["t0"]
             self.place(F, F, int(self.fx - F / 2), int(self.fy - F / 2))
             self.canvas.delete("all")
-            self.free = ("bottom", F / 2, F / 2 + math.sin(min(1.0, el / 0.18) * math.pi) * S * 0.6)
+            self.free = ("bottom", F / 2, F / 2 + math.sin(min(1.0, el / 0.12) * math.pi) * S * 0.6)
             self.draw_body(0, 0, "happy", 0, "wave", -1, blush=True)
             self.free = None
             if self.bubble and now < self.bubble[1]:
                 self.bubble_at(self.bubble[0], F / 2, F / 2 - 6 * S, "up", F, F)
-            if el > 0.18:  # ...then inflate into the window (drawn on the big overlay from here on)
+            if el > 0.12:  # ...then inflate into the window (drawn on the big overlay from here on)
                 self.canvas.delete("all")
                 self.start_panel((self.fx - 5 * S, self.fy - 5 * S, self.fx + 5 * S, self.fy + 3 * S))
                 sm.update(phase="inside")
@@ -1770,10 +1788,7 @@ class Pet:
         if (isinstance(rr, list) and len(rr) == 4 and rr[2] - rr[0] > 300 and rr[3] - rr[1] > 200
                 and rr[0] < r and rr[2] > l and rr[1] < b and rr[3] > t):
             to = tuple(rr)  # grow straight into where Claude's window will appear
-        try:
-            E = max(0.7, min(3.5, float(st.get("launch", 1.6)) * 0.9))  # land about when the app shows up
-        except (TypeError, ValueError):
-            E = 1.4
+        E = 0.45  # expand fast, then hold as a window with loading dots until the app shows up
         self.pan = {"phase": "grow", "t0": time.time(), "from": body, "to": to, "cur": body,
                     "origin": (l, t), "m": 0.0, "limb": 1.0, "E": E}
 
@@ -1825,7 +1840,7 @@ class Pet:
                     el = 0.0
         if pn["phase"] == "grow":  # his body stretches into the window, timed to land as the app appears
             u = min(1.0, el / pn["E"])
-            e = 1 - (1 - u) ** 3  # quick start, gentle arrival
+            e = 1 - (1 - u) ** 4  # snappy start, soft landing
             pn["cur"] = lerp_rect(pn["from"], pn["to"], e)
             pn["limb"] = max(0.0, 1 - e * 2.2)
             pn["m"] = smooth((e - 0.35) / 0.65)
