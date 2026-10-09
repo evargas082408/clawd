@@ -72,6 +72,47 @@ LINES_POP = ["hi :)", "just checking", "still here!", "*yawn*", "o/", "wheee"]
 LINES_GRAB = ["hey!", "wahh!", "put me down!", "eek!", "hehe stop"]
 LINES_DONE = ["all done!", "done :)", "ta-da!", "finished!", "your turn!"]
 
+# ---- love & gacha
+STEAM = [".XX.", "XXXX", ".XX."]
+CLOUD = [".XX.X.", "XXXXXX", ".XXXX."]
+MOOD_LINES = {
+    "smitten": {"pop": ["love you!", "hi bestie <3", "you're the best", "missed you!", "*happy wiggle*"],
+                "click": ["<3 <3 <3", "hehe stop it", "best human", "boop back!", "yay!"],
+                "pet": ["purrr", "<3", "hehe", "more pls"], "grab": ["wheee!", "hehe!", "up we go!"]},
+    "happy": {"pop": LINES_POP, "click": LINES_CLICK, "pet": ["hehe", "<3", "purr", "hi!"], "grab": LINES_GRAB},
+    "meh": {"pop": ["hm.", "*yawn*", "still here", "..."], "click": ["hm?", "what", "yeah?", "ok"],
+            "pet": ["...ok", "hm", "fine"], "grab": ["hey", "ugh", "where to"]},
+    "grumpy": {"pop": ["oh, NOW you notice me?", "hmph.", "cool. cool cool cool.", "I see how it is", "don't mind me..."],
+               "click": ["what.", "oh hi. finally.", "hmph", "don't poke me"],
+               "refuse": ["hmph.", "nope.", "oh NOW you care?", "I'm busy."],
+               "pet": ["...", "hmph"], "grab": ["put me DOWN", "rude!", "excuse me??"]},
+    "sulky": {"pop": ["...", "go away", "not talking to you", "*sulks*"], "click": ["...", "leave me alone"],
+              "refuse": ["...", "go away", "nope", "*turns away*"], "pet": ["..."], "grab": ["...", "whatever"]},
+}
+MOOD_LUCK = {"smitten": 1.8, "happy": 1.2, "meh": 1.0, "grumpy": 0.6, "sulky": 0.4}  # rare+ odds multiplier
+RARITY = {  # base chance, colour, love it gives
+    "common": (0.58, "#8D96A0", 1),
+    "uncommon": (0.27, "#3FA65A", 2),
+    "rare": (0.10, "#3B7FE6", 4),
+    "epic": (0.04, "#9B5CF6", 6),
+    "legendary": (0.01, "#E0A21A", 10),
+}
+LOOT = {"rare": ["bow", "flower", "party hat"], "epic": ["sunglasses", "halo"], "legendary": ["crown", "golden skin"]}
+ALL_LOOT = ["bow", "flower", "party hat", "sunglasses", "halo", "crown", "golden skin"]
+GEAR = {  # (col, row, w, h, colour) in sprite pixels; rows < 0 sit on top of his head
+    "crown": [(4, -3, 1, 1, "#F5C451"), (6, -3, 2, 1, "#F5C451"), (9, -3, 1, 1, "#F5C451"),
+              (4, -2, 6, 1, "#F5C451"), (6, -2, 2, 1, "#E5484D"), (4, -1, 6, 1, "#C99A2E")],
+    "party hat": [(7, -5, 1, 1, "#FFFFFF"), (7, -4, 1, 1, "#F27BA8"), (6, -3, 3, 1, "#5AA9F2"),
+                  (6, -2, 3, 1, "#F27BA8"), (5, -1, 5, 1, "#5AA9F2")],
+    "bow": [(9, -2, 1, 2, "#F27BA8"), (10, -1, 1, 1, "#C2507E"), (11, -2, 1, 2, "#F27BA8")],
+    "flower": [(4, -3, 1, 1, "#FFFFFF"), (3, -2, 1, 1, "#FFFFFF"), (5, -2, 1, 1, "#FFFFFF"),
+               (4, -1, 1, 1, "#FFFFFF"), (4, -2, 1, 1, "#F5C451")],
+    "sunglasses": [(3, 2, 3, 2, "#151515"), (8, 2, 3, 2, "#151515"), (6, 2, 2, 1, "#151515"),
+                   (3, 2, 1, 1, "#707070"), (8, 2, 1, 1, "#707070")],
+    "halo": [(5, -4, 4, 1, "#F7D96B"), (4, -3, 1, 1, "#F7D96B"), (9, -3, 1, 1, "#F7D96B")],
+}
+SKINS = {"classic": None, "golden": {"O": "#E8B23A", "D": "#B98A1C", "L": "#FBE08A"}}
+
 
 def log(*a):
     try:
@@ -743,6 +784,7 @@ class Pet:
 
         self.canvas = tk.Canvas(root, bg=KEY, highlightthickness=0, bd=0)
         self.canvas.pack(fill="both", expand=True)
+        self.skin_map = None
         root.pack_propagate(False)
         self.canvas.bind("<Button-1>", self.on_click)
         self.canvas.bind("<Button-3>", self.on_menu)
@@ -771,14 +813,8 @@ class Pet:
         self.grav = "bottom"
 
         self.menu = tk.Menu(root, tearoff=0)
+        self.wear_menu = tk.Menu(self.menu, tearoff=0)
         self.startup_var = tk.BooleanVar(value=startup_enabled())
-        self.menu.add_command(label="Pet Clawd", command=lambda: self.q.put(("hi", "")))
-        self.menu.add_command(label="Test permission alert", command=lambda: self.q.put(("alert", "Bash")))
-        self.menu.add_command(label="Sit on Claude's input box", command=lambda: self.q.put(("perch", "")))
-        self.menu.add_command(label="Hide for 10 minutes", command=self.go_away)
-        self.menu.add_checkbutton(label="Start with Windows", variable=self.startup_var, command=self.toggle_startup)
-        self.menu.add_separator()
-        self.menu.add_command(label="Quit", command=root.destroy)
 
         now = time.time()
         self.mode = "idle"
@@ -820,6 +856,7 @@ class Pet:
         self.no_side_until = 0.0
         self.last = now
         self.t = 0.0
+        self.load_love()
         self.make_panel()  # made up front so opening Claude doesn't hitch
         self.tick()
 
@@ -899,6 +936,8 @@ class Pet:
     def rect(self, x, y, w, h, col, canon=True):
         if canon:
             x, y, w, h = self.T(x, y, w, h)
+        if self.skin_map:
+            col = self.skin_map.get(col, col)
         self.canvas.create_rectangle(int(x), int(y), int(x + w), int(y + h), fill=C.get(col, col), width=0)
 
     def pattern(self, cx, cy, pat, col, ps):
@@ -909,7 +948,7 @@ class Pet:
                 if ch == "X":
                     self.rect(x0 + i * ps, y0 + j * ps, ps, ps, col, canon=False)
 
-    def bubble_at(self, lines, ax, ay, side, cw, ch):
+    def bubble_at(self, lines, ax, ay, side, cw, ch, color=None):
         S = self.S
         tw = max(self.font.measure(s) for s in lines)
         lh = self.font.metrics("linespace")
@@ -926,11 +965,12 @@ class Pet:
         x = max(1, min(cw - bw - 1, x))
         y = max(1, min(ch - bh - 1, y))
         b = max(2, S // 2)
-        self.rect(x + b, y, bw - 2 * b, bh, "T", canon=False)
-        self.rect(x, y + b, bw, bh - 2 * b, "T", canon=False)
+        self.rect(x + b, y, bw - 2 * b, bh, color or "T", canon=False)
+        self.rect(x, y + b, bw, bh - 2 * b, color or "T", canon=False)
         self.rect(x + b, y + b, bw - 2 * b, bh - 2 * b, "W", canon=False)
         for i, s in enumerate(lines):
-            self.canvas.create_text(x + bw / 2, y + pad + lh * i + lh / 2, text=s, font=self.font, fill=C["T"])
+            self.canvas.create_text(x + bw / 2, y + pad + lh * i + lh / 2, text=s, font=self.font,
+                                    fill=color or C["T"])
 
     def draw_body(self, ox, top, eyes, look, arms, legs_frame, blush, legs=True):
         """Draw the 14x10 critter with its top-left at canonical (ox, top). arms: 'normal'|'wave'|('grip', y)"""
@@ -961,6 +1001,12 @@ class Pet:
                 self.rect(ex + d * S, top + 1 * S, S, S, "K")
                 self.rect(ex, top + 2 * S, S, S, "K")
                 self.rect(ex + d * S, top + 3 * S, S, S, "K")
+            elif eyes == "annoyed":  # unimpressed: flat half-closed lids
+                self.rect(ex - S / 2, top + 2.5 * S, 2 * S, max(1, S / 3), "K")
+                self.rect(ex, top + 3 * S, S, S, "K")
+            elif eyes == "star":  # sparkly gacha eyes
+                self.rect(ex, top + 2 * S, S, 2 * S, "S")
+                self.rect(ex, top + 2 * S, S / 2 + 1, S / 2 + 1, "W")
         if blush:
             self.rect(ox + 3 * S, top + 4 * S, S, S, "P")
             self.rect(ox + 10 * S, top + 4 * S, S, S, "P")
@@ -978,6 +1024,10 @@ class Pet:
                 self.rect(ox + c * S, hy + S, 2 * S, S, "O")
                 self.rect(ox + c * S + S // 2, hy + S, max(1, S // 3), S, "D")
                 self.rect(ox + c * S + S + S // 2, hy + S, max(1, S // 3), S, "D")
+        elif arms == "crossed":  # arms folded: attitude
+            self.rect(ox + 3 * S, top + 5 * S, 8 * S, S, "D")
+            self.rect(ox + 3 * S, top + 5 * S, S, S, "L")
+            self.rect(ox + 10 * S, top + 5 * S, S, S, "L")
         elif arms == "flail":
             up = int(self.t * 12) % 2
             self.rect(ox, top + (1 if up else 4) * S, 2 * S, (3 if up else 2) * S, "O")
@@ -991,6 +1041,17 @@ class Pet:
             else:
                 self.rect(ox + 12 * S, top + 4 * S, 2 * S, S, "O")
                 self.rect(ox + 12 * S, top + 5 * S, 2 * S, S, "D")
+        self.draw_gear(ox, top)
+
+    def draw_gear(self, ox, top):
+        """whatever he's wearing from the gacha"""
+        item = self.wear
+        if item not in GEAR:
+            return
+        S = self.S
+        dy = math.sin(self.t * 3) * 0.35 if item == "halo" else 0
+        for x, y, w, h, col in GEAR[item]:
+            self.rect(ox + x * S, top + (y + dy) * S, w * S, h * S, col)
 
     # ---------- interaction
     def on_click(self, _e):
@@ -1003,12 +1064,19 @@ class Pet:
             self.pending_alert = None
             self.say("on it!", 1.2)
             return
+        if _e is not None and self.mode == "idle":
+            self.pull()  # every click on him is a gacha pull
+            self.last_hover = time.time()
+            return
+        # "Pet Clawd" from the menu
         if self.jump < 1.5 * self.S:  # only hop from the ground, so spam-clicking can't stack hops
             self.jv = 9.0 * self.S
         self.pgoal = self.FULL
-        self.say(random.choice(LINES_CLICK), 1.8)
+        self.say(random.choice(MOOD_LINES[self.mood()]["pet"]), 1.8)
         for _ in range(4):
             self.spawn("heart")
+        self.add_love(1.5)
+        self.meter_until = time.time() + 3
         self.last_hover = time.time()
 
     def on_press(self, e):
@@ -1049,10 +1117,12 @@ class Pet:
         self.action = None
         self.pending_edge = None
         self.sleeping = False
-        self.say(random.choice(LINES_GRAB), 1.6)
+        self.say(random.choice(MOOD_LINES[self.mood()]["grab"]), 1.6)
 
     def throw(self):
         now = time.time()
+        # being tossed around: fun when he likes you, rude when he doesn't
+        self.add_love(0.5 if self.mood() in ("smitten", "happy") else -1.5)
         px, py = self.root.winfo_pointerxy()
         self.drag_hist.append((now, px, py))  # include the exact release point
         vx, vy = self.drag_velocity(0.09)
@@ -1122,6 +1192,9 @@ class Pet:
         self._geom = None
         for _ in range(2):
             self.spawn("spark")
+        if self.mood() in ("grumpy", "sulky"):  # "rude!!"
+            for _ in range(3):
+                self.spawn("steam")
 
     def tick_drag(self, now, dt):
         S = self.S
@@ -1198,6 +1271,175 @@ class Pet:
         self.draw_body(0, 0, "open", 0, "flail", int(self.t * 14) % 2, blush=False)
         self.free = None
         self.draw_particles(dt)
+
+    # ---------- love & gacha
+    def load_love(self):
+        st = load_state()
+        now = time.time()
+
+        def num(key, default, kind=float):
+            try:
+                return kind(st.get(key, default))
+            except (TypeError, ValueError):
+                return default
+        away = max(0.0, now - num("saved_at", now))
+        # he missed you while he wasn't running (gently, and capped)
+        self.love = max(0.0, min(100.0, num("love", 60.0) - min(35.0, away / 3600 * 4)))
+        self.pulls, self.pity_rare, self.pity_leg = num("pulls", 0, int), num("pity_rare", 0, int), num("pity_leg", 0, int)
+        owned = st.get("owned", [])
+        self.owned = {x for x in owned if x in ALL_LOOT} if isinstance(owned, list) else set()
+        self.wear = st.get("wear") if st.get("wear") in self.owned else None
+        self.skin = "golden" if (st.get("skin") == "golden" and "golden skin" in self.owned) else "classic"
+        self.skin_map = SKINS[self.skin]
+        self.last_touch = now
+        self.love_dirty, self.next_love_save = True, now + 5
+        self.click_times = collections.deque()
+        self.meter_until = 0.0
+        self.refusing, self.warm, self.warmed_at, self.refuse_look = False, 0.0, 0.0, 1
+        self.eyes_fx, self.eyes_fx_until = None, 0.0
+
+    def save_love(self):
+        save_state(love=round(self.love, 2), saved_at=time.time(), pulls=self.pulls, pity_rare=self.pity_rare,
+                   pity_leg=self.pity_leg, owned=sorted(self.owned), wear=self.wear, skin=self.skin)
+        self.love_dirty = False
+
+    def mood(self):
+        L = self.love
+        return "smitten" if L >= 80 else "happy" if L >= 55 else "meh" if L >= 30 else "grumpy" if L >= 10 else "sulky"
+
+    def add_love(self, x):
+        self.love = max(0.0, min(100.0, self.love + x))
+        self.love_dirty = True
+        if x > 0:
+            self.last_touch = time.time()
+
+    def tick_love(self, now, dt):
+        if now - self.last_touch > 45 and self.love > 0:  # ignored: love slowly drains (~1% every 90s)
+            self.love = max(0.0, self.love - dt / 90)
+            self.love_dirty = True
+        if self.love_dirty and now >= self.next_love_save:
+            self.next_love_save = now + 20
+            self.save_love()
+
+    def roll(self):
+        """one gacha roll; better luck the more he loves you, with pity so you can't go dry forever"""
+        self.pulls += 1
+        self.pity_rare += 1
+        self.pity_leg += 1
+        if self.pity_leg >= 60:
+            r = "legendary"
+        elif self.pity_rare >= 10:
+            r = random.choices(["rare", "epic", "legendary"], [10, 4, 1])[0]
+        else:
+            luck = MOOD_LUCK[self.mood()]
+            names = list(RARITY)
+            r = random.choices(names, [RARITY[n][0] * (luck if n in LOOT else 1) for n in names])[0]
+        if r in LOOT:
+            self.pity_rare = 0
+        if r == "legendary":
+            self.pity_leg = 0
+        self.love_dirty = True
+        return r
+
+    def pull(self):
+        now = time.time()
+        S = self.S
+        mood = self.mood()
+        lines = MOOD_LINES[mood]
+        self.click_times.append(now)
+        while self.click_times and now - self.click_times[0] > 8:
+            self.click_times.popleft()
+        self.meter_until = now + 3.0
+        self.pgoal = self.FULL
+        if len(self.click_times) > 6:  # spam-clicking: he's had enough
+            self.say(random.choice(["ok ok OK", "stop poking!", "I get it!!", "...enough"]), 1.4)
+            if mood in ("grumpy", "sulky"):
+                self.add_love(-0.5)
+            for _ in range(3):
+                self.spawn("steam")
+            return
+        if mood in ("grumpy", "sulky") and now - self.warmed_at > 60:
+            # attitude: if you haven't petted him in a while he might just ignore you
+            if random.random() < (0.6 if mood == "sulky" else 0.3):
+                self.say(random.choice(lines["refuse"]), 1.6)
+                self.eyes_fx, self.eyes_fx_until = "annoyed", now + 1.6
+                for _ in range(2):
+                    self.spawn("steam")
+                self.add_love(0.3)  # (attention is still attention)
+                return
+        r = self.roll()
+        col = RARITY[r][1]
+        if self.jump < 1.5 * S:
+            self.jv = (12.0 if r == "legendary" else 9.0) * S
+        if r == "common":
+            self.say(random.choice(lines["click"]), 1.6)
+            for _ in range(2):
+                self.spawn("heart")
+        elif r == "uncommon":
+            if random.random() < 0.5:
+                self.say("+ " + random.choice(lines["click"]) + " +", 1.8, color=col)
+                for _ in range(9):
+                    self.spawn("heart")
+            else:
+                self.eyes_fx, self.eyes_fx_until = "star", now + 1.8
+                self.say("sparkle eyes!", 1.8, color=col)
+                for _ in range(4):
+                    self.spawn("spark", col=col)
+        else:
+            item = random.choice(LOOT[r])
+            new = item not in self.owned
+            self.owned.add(item)
+            if item == "golden skin":
+                self.skin, self.skin_map = "golden", SKINS["golden"]
+            else:
+                self.wear = item
+            banner = {"rare": "* RARE *", "epic": "** EPIC **", "legendary": "*** LEGENDARY ***"}[r]
+            self.say(f"{banner}\n{item}" + ("  NEW!" if new else "  (dupe)"), 3.0 if r == "legendary" else 2.4, color=col)
+            for _ in range({"rare": 6, "epic": 10, "legendary": 18}[r]):
+                self.spawn("spark", col=col)
+            if r == "legendary":
+                self.eyes_fx, self.eyes_fx_until = "star", now + 3.0
+        self.add_love(RARITY[r][2] * (0.5 if mood in ("grumpy", "sulky") else 1.0))
+
+    def set_wear(self, item):
+        self.wear = item
+        self.save_love()
+
+    def set_skin(self, skin):
+        self.skin, self.skin_map = skin, SKINS[skin]
+        self.save_love()
+
+    def build_menu(self):
+        m, w = self.menu, self.wear_menu
+        m.delete(0, "end")
+        w.delete(0, "end")
+        m.add_command(label=f"\u2665 Love {int(self.love)}%  \u00b7  {self.mood()}", state="disabled")
+        m.add_command(label=f"Pulls {self.pulls}  \u00b7  collection {len(self.owned)}/{len(ALL_LOOT)}", state="disabled")
+        w.add_command(label=("\u2713 " if self.wear is None else "     ") + "nothing", command=lambda: self.set_wear(None))
+        for item in ALL_LOOT:
+            if item in self.owned and item in GEAR:
+                w.add_command(label=("\u2713 " if self.wear == item else "     ") + item,
+                              command=lambda i=item: self.set_wear(i))
+        if "golden skin" in self.owned:
+            w.add_separator()
+            for sk in ("classic", "golden"):
+                w.add_command(label=("\u2713 " if self.skin == sk else "     ") + sk + " skin",
+                              command=lambda s_=sk: self.set_skin(s_))
+        m.add_cascade(label="Wear", menu=w, state="normal" if self.owned else "disabled")
+        m.add_separator()
+        m.add_command(label="Pet Clawd", command=lambda: self.q.put(("hi", "")))
+        m.add_command(label="Test permission alert", command=lambda: self.q.put(("alert", "Bash")))
+        m.add_command(label="Sit on Claude's input box", command=lambda: self.q.put(("perch", "")))
+        m.add_command(label="Hide for 10 minutes", command=self.go_away)
+        m.add_checkbutton(label="Start with Windows", variable=self.startup_var, command=self.toggle_startup)
+        m.add_separator()
+        m.add_command(label="Quit", command=self.quit_clawd)
+
+    def quit_clawd(self):
+        try:
+            self.save_love()
+        finally:
+            self.root.destroy()
 
     # ---------- size (pixel scale)
     def apply_size(self, s):
@@ -1382,9 +1624,12 @@ class Pet:
             self.action, self.pgoal = "peek", self.EYES
             self.action_until = now + random.uniform(3, 6)
         elif r < 0.65:
-            self.action, self.pgoal = "popup", self.FULL
-            self.wave = random.random() < 0.6
+            mood = self.mood()
+            self.action, self.pgoal = "popup", (self.EYES if mood == "sulky" else self.FULL)
+            self.wave = mood in ("smitten", "happy") and random.random() < 0.6
             self.action_until = now + random.uniform(1.8, 3.0)
+            if mood in ("smitten", "grumpy") and random.random() < 0.3:
+                self.say(random.choice(MOOD_LINES[mood]["pop"]), 2.0)
         elif r < 0.8:
             self.action, self.pgoal = "duck", self.HANDS  # just his hands on the box
             self.action_until = now + random.uniform(2, 4)
@@ -1630,6 +1875,8 @@ class Pet:
                                fill=mix(bg, C["O"], (m - 0.9) * 10))
 
     def on_menu(self, e):
+        self.build_menu()
+        self.meter_until = time.time() + 3
         try:
             self.menu.tk_popup(e.x_root, e.y_root)
         finally:
@@ -1647,19 +1894,22 @@ class Pet:
         self.away_until = time.time() + 600
         self.root.withdraw()
 
-    def say(self, text, secs):
-        self.bubble = (text.split("\n"), time.time() + secs)
+    def say(self, text, secs, color=None):
+        self.bubble = (text.split("\n"), time.time() + secs, color)
 
-    def spawn(self, kind, absolute=None):
+    def spawn(self, kind, absolute=None, col=None, vy=None, at=None):
         S = self.S
         if absolute:
             x, y = absolute
+        elif at:
+            x, y = at
         else:
             x = self.GX + 7 * S + random.uniform(-5, 5) * S
             y = self.CH - self.p - self.jump + random.uniform(0, 3) * S
         self.particles.append({
-            "x": x, "y": y, "vx": random.uniform(-1, 1) * S * 2, "vy": -random.uniform(5, 9) * S,
-            "life": 1.0, "kind": kind, "abs": absolute is not None,
+            "x": x, "y": y, "vx": random.uniform(-1, 1) * S * 2,
+            "vy": -random.uniform(5, 9) * S if vy is None else vy,
+            "life": 1.0, "kind": kind, "abs": absolute is not None, "col": col,
         })
 
     # ---------- messages
@@ -1723,7 +1973,7 @@ class Pet:
                 elif self.perched:
                     self.perched = False
             elif cmd == "quit":
-                self.root.destroy()
+                self.quit_clawd()
 
     def come_back(self):
         self.mode = "idle"
@@ -1890,12 +2140,17 @@ class Pet:
             self.pgoal = self.EYES
             self.action_until = now + random.uniform(2.5, 4.5)
         elif r < 0.72:
-            self.action = "popup"
-            self.pgoal = self.FULL
-            self.wave = True
-            self.action_until = now + random.uniform(2.2, 3.2)
-            if random.random() < 0.5:
-                self.say(random.choice(LINES_POP), 2.0)
+            mood = self.mood()
+            if mood == "sulky":  # sulking: stays tucked away
+                self.action, self.pgoal = "peek", self.EYES
+                self.action_until = now + random.uniform(2.5, 4.5)
+            else:
+                self.action = "popup"
+                self.pgoal = self.FULL
+                self.wave = mood in ("smitten", "happy")
+                self.action_until = now + random.uniform(2.2, 3.2)
+                if random.random() < (0.7 if mood in ("smitten", "grumpy") else 0.5):
+                    self.say(random.choice(MOOD_LINES[mood]["pop"]), 2.2)
         elif r < 0.86:
             self.action = "switch"
             self.pending_edge = random.choice([e for e in ("bottom", "top", "left", "right") if e != self.edge])
@@ -1987,6 +2242,7 @@ class Pet:
         inside = box is not None and box[0] - m <= px <= box[2] + m and box[1] - m <= py <= box[3] + m
         inside = inside and (perch_visible or not self.perched)
         if inside:
+            mood = self.mood()
             if not self.hover:
                 self.hover = True
                 self.target = self.pos
@@ -1994,17 +2250,36 @@ class Pet:
                 self.sleeping = False
                 self.wave = False
                 self.action = "petted"
-                if random.random() < 0.4:
-                    self.say(random.choice(["hehe", "<3", "purr", "hi!"]), 1.5)
+                # with attitude he won't take pets right away - keep at it and he gives in
+                self.refusing = mood in ("grumpy", "sulky") and now - self.warmed_at > 60
+                self.warm = 0.0
+                self.refuse_look = random.choice((-1, 1))
+                if self.refusing:
+                    self.say(random.choice(MOOD_LINES[mood]["refuse"]), 1.6)
+                elif random.random() < 0.4:
+                    self.say(random.choice(MOOD_LINES[mood]["pet"]), 1.5)
             self.last_hover = now
-            self.pgoal = self.FULL
-            if now > self.next_heart:
-                self.spawn("heart")
-                self.next_heart = now + 0.35
-            if self.jump == 0 and random.random() < 0.025:
-                self.jv = 5.0 * S
+            if self.refusing:
+                self.warm += dt
+                self.pgoal = self.FULL if mood == "grumpy" else self.EYES  # sulky: just peeks at you warily
+                if random.random() < 0.05:
+                    self.spawn("steam")
+                if self.warm >= (1.6 if mood == "grumpy" else 3.2):
+                    self.refusing = False
+                    self.warmed_at = now
+                    self.say(random.choice(["...fine.", "ok maybe a little", "hmph... ok", "...don't stop"]), 1.8)
+                    self.add_love(1.0)
+            else:
+                self.pgoal = self.FULL
+                self.add_love(dt * 0.6 * (1 - self.love / 130))  # petting slowly fills his heart
+                if now > self.next_heart:
+                    self.spawn("heart")
+                    self.next_heart = now + 0.35
+                if self.jump == 0 and random.random() < 0.025:
+                    self.jv = 5.0 * S
         elif self.hover and now - self.last_hover > 0.08:
             self.hover = False
+            self.refusing = False
             self.action = None
             if self.pending_alert is None:
                 self.bubble = None
@@ -2112,6 +2387,13 @@ class Pet:
 
         if self.sleeping and random.random() < 0.03:
             self.spawn("z")
+        mood = self.mood()
+        if self.p > self.EYES - S and not self.hover:
+            if mood == "smitten" and random.random() < 0.008:  # can't help it
+                self.spawn("heart")
+            elif mood == "sulky" and random.random() < 0.08:  # his little rain cloud
+                top_ = self.CH - self.p - self.jump
+                self.spawn("rain", at=(self.GX + 7 * S + random.uniform(-2, 2) * S, top_ - 3 * S), vy=6 * S)
         if self.action == "cheer" and random.random() < 0.15:
             self.spawn("spark")
 
@@ -2126,35 +2408,67 @@ class Pet:
         c = self.canvas
         c.delete("all")
         top = self.CH - self.p - self.jump
-        if self.sleeping:
+        mood = self.mood()
+        sassy = mood in ("grumpy", "sulky") and not (self.hover and not self.refusing)
+        if now < self.eyes_fx_until:
+            eyes = self.eyes_fx
+        elif self.sleeping:
             eyes = "sleep"
+        elif self.hover and self.refusing:
+            eyes = "annoyed"
         elif self.hover or self.action in ("cheer", "landed"):
             eyes = "happy"
         elif now < self.blink_until:
             eyes = "blink"
+        elif sassy:
+            eyes = "annoyed"
         else:
             eyes = "open"
+        look = self.refuse_look if (self.hover and self.refusing) else (self.look if eyes in ("open", "annoyed") else 0)
         hand_y = self.CH - 2 * S - min(0, self.p)
         gripping = top + 4 * S > hand_y
-        arms = ("grip", hand_y) if gripping else ("wave" if self.wave or self.action == "cheer" else "normal")
+        if gripping:
+            arms = ("grip", hand_y)
+        elif self.wave or self.action == "cheer":
+            arms = "wave"
+        else:
+            arms = "crossed" if sassy else "normal"
         legs_frame = int(self.t * 8) % 2 if (self.walking or self.hover) else -1
+        blush = (self.hover and not self.refusing) or self.action == "cheer" or mood == "smitten"
         if self.p > self.HIDE + 1 or not gripping:
-            self.draw_body(self.GX, top, eyes, self.look if eyes == "open" else 0, arms, legs_frame,
-                           blush=self.hover or self.action == "cheer")
+            self.draw_body(self.GX, top, eyes, look, arms, legs_frame, blush=blush)
         if self.pending_alert is not None and self.hover and int(self.t * 3) % 2 == 0:
             self.rect(self.GX + 15 * S, top + 0 * S, S, 3 * S, "R")
             self.rect(self.GX + 15 * S, top + 4 * S, S, S, "R")
+        visible = self.p > self.EYES - S
+        hat = max(0, -min(g[1] for g in GEAR[self.wear])) if self.wear in GEAR else 0  # headgear height
+        meter = visible and (now < self.meter_until or (self.hover and not self.refusing))
+        if meter:
+            self.draw_meter(top - hat * S)
+        elif visible and mood == "sulky" and not self.hover:
+            ax, ay = self.Tp(self.GX + 7 * S, top - (4 + hat) * S)
+            self.pattern(ax, ay, CLOUD, "#7D8597", max(2, S * 0.7))
         # bubble
         if self.bubble:
-            lines, until = self.bubble
+            lines, until = self.bubble[0], self.bubble[1]
+            color = self.bubble[2] if len(self.bubble) > 2 else None
             if now > until:
                 self.bubble = None
-            elif self.p > self.EYES - S:
-                ax, ay = self.Tp(self.GX + 7 * S, top - S)
+            elif visible:
+                ax, ay = self.Tp(self.GX + 7 * S, top - ((5 if meter else 1) + hat) * S)
                 side = {"bottom": "up", "top": "down", "left": "right", "right": "left"}[self.edge]
                 w, h = self.canvas_size()
-                self.bubble_at(lines, ax, ay, side, w, h)
+                self.bubble_at(lines, ax, ay, side, w, h, color)
         self.draw_particles(dt)
+
+    def draw_meter(self, top):
+        """his love as 5 little pixel hearts over his head"""
+        S = self.S
+        ps = max(2, S * 0.5)
+        filled = int(self.love / 20 + 0.5)
+        for i in range(5):
+            ax, ay = self.Tp(self.GX + 7 * S + (i - 2) * 6 * ps, top - 2.5 * S)
+            self.pattern(ax, ay, HEART, "H" if i < filled else "#5A5250", ps)
 
     def draw_particles(self, dt):
         S = self.S
@@ -2169,12 +2483,17 @@ class Pet:
             alive.append(pt)
             ax, ay = (pt["x"], pt["y"]) if pt["abs"] else self.Tp(pt["x"], pt["y"])
             ps = max(2, S * 3 // 5)
-            if pt["kind"] == "heart":
-                self.pattern(ax, ay, HEART, "H", ps)
-            elif pt["kind"] == "spark":
-                self.pattern(ax, ay, SPARK, "S", ps)
-            elif pt["kind"] == "sweat":
+            col, kind = pt.get("col"), pt["kind"]
+            if kind == "heart":
+                self.pattern(ax, ay, HEART, col or "H", ps)
+            elif kind == "spark":
+                self.pattern(ax, ay, SPARK, col or "S", ps)
+            elif kind == "sweat":
                 self.pattern(ax, ay, DROP, "B", max(2, S // 2))
+            elif kind == "steam":
+                self.pattern(ax, ay, STEAM, col or "#CFCFCF", max(2, S // 2))
+            elif kind == "rain":
+                self.pattern(ax, ay, DROP, col or "#7FB2E5", max(2, S // 3))
             else:
                 self.pattern(ax, ay, ZED, "Z", max(2, S // 2))
         self.particles = alive[-40:]
@@ -2193,6 +2512,7 @@ class Pet:
                                      or (self.home and now >= self.return_at - 1.0))
             self.tick_panel(now)
             self.step_size(now, dt)
+            self.tick_love(now, dt)
             if self.perched or self.mode == "leap":
                 self.ease_perch(dt)
             else:
