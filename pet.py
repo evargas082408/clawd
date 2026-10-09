@@ -742,7 +742,6 @@ class Pet:
         self.panel_font = tkfont.Font(family="Consolas", size=15, weight="bold")
 
         self.canvas = tk.Canvas(root, bg=KEY, highlightthickness=0, bd=0)
-        self.cv = self.canvas  # where drawing goes this frame
         self.canvas.pack(fill="both", expand=True)
         root.pack_propagate(False)
         self.canvas.bind("<Button-1>", self.on_click)
@@ -822,7 +821,6 @@ class Pet:
         self.last = now
         self.t = 0.0
         self.make_panel()  # made up front so opening Claude doesn't hitch
-        self.make_sky()
         self.tick()
 
     # ---------- geometry helpers
@@ -901,7 +899,7 @@ class Pet:
     def rect(self, x, y, w, h, col, canon=True):
         if canon:
             x, y, w, h = self.T(x, y, w, h)
-        self.cv.create_rectangle(int(x), int(y), int(x + w), int(y + h), fill=C.get(col, col), width=0)
+        self.canvas.create_rectangle(int(x), int(y), int(x + w), int(y + h), fill=C.get(col, col), width=0)
 
     def pattern(self, cx, cy, pat, col, ps):
         h, w = len(pat), len(pat[0])
@@ -932,7 +930,7 @@ class Pet:
         self.rect(x, y + b, bw, bh - 2 * b, "T", canon=False)
         self.rect(x + b, y + b, bw - 2 * b, bh - 2 * b, "W", canon=False)
         for i, s in enumerate(lines):
-            self.cv.create_text(x + bw / 2, y + pad + lh * i + lh / 2, text=s, font=self.font, fill=C["T"])
+            self.canvas.create_text(x + bw / 2, y + pad + lh * i + lh / 2, text=s, font=self.font, fill=C["T"])
 
     def draw_body(self, ox, top, eyes, look, arms, legs_frame, blush, legs=True):
         """Draw the 14x10 critter with its top-left at canonical (ox, top). arms: 'normal'|'wave'|('grip', y)"""
@@ -1044,7 +1042,6 @@ class Pet:
         self.perch_wanted_until = 0
         self.return_at = float("inf")  # (set again once he lands)
         self.set_size(self.S_big)  # grows back in your hand
-        self.fit_sky()
         self.mode = "drag"
         self.drag_hist.clear()
         self.particles = []
@@ -1140,18 +1137,19 @@ class Pet:
         vx, _ = self.drag_velocity(0.06)
         target = max(-3.0 * S, min(3.0 * S, -vx * S / 450))
         self.swing += (target - self.swing) * min(1.0, dt * 10)
-        ox, oy = self.sky_frame()
-        cx, cy = self.fx - ox, self.fy - oy
+        F = self.FW
+        self.place(F, F, int(self.fx - F / 2), int(self.fy - F / 2))
+        self.canvas.delete("all")
         wig = math.sin(self.t * 15) * S * 0.45
-        self.free = ("bottom", cx + self.swing + wig, cy)
+        self.free = ("bottom", F / 2 + self.swing + wig, F / 2)
         self.draw_body(0, 0, "squirm", 0, "flail", int(self.t * 16) % 2, blush=True)
         self.free = None
-        if random.random() < 0.12:  # sweat drops fly off into the air
+        if random.random() < 0.12:
             side = random.choice((-1, 1))
-            self.particles.append({"x": cx + side * 6 * S, "y": cy - 4 * S, "vx": side * 6 * S,
+            self.particles.append({"x": F / 2 + side * 6 * S, "y": F / 2 - 4 * S, "vx": side * 6 * S,
                                    "vy": -4 * S, "life": 0.6, "kind": "sweat", "abs": True})
         if self.bubble and now < self.bubble[1]:
-            self.bubble_at(self.bubble[0], cx, cy - 6 * S, "up", *self.sky_wh)
+            self.bubble_at(self.bubble[0], F / 2, F / 2 - 6 * S, "up", F, F)
         self.draw_particles(dt)
 
     def tick_fall(self, now, dt):
@@ -1193,8 +1191,10 @@ class Pet:
             edge, eta = min(soon, key=lambda e: e[1])
             if eta < 0.1:
                 orient = edge
-        ox, oy = self.sky_frame()
-        self.free = (orient, self.fx - ox, self.fy - oy)
+        F = self.FW
+        self.place(F, F, int(self.fx - F / 2), int(self.fy - F / 2))
+        self.canvas.delete("all")
+        self.free = (orient, F / 2, F / 2)
         self.draw_body(0, 0, "open", 0, "flail", int(self.t * 14) % 2, blush=False)
         self.free = None
         self.draw_particles(dt)
@@ -1348,8 +1348,10 @@ class Pet:
         if u >= 1:
             self.arrive_perch(now)
             return
-        ox, oy = self.sky_frame()
-        self.free = ("bottom", self.fx - ox, self.fy - oy)
+        F = self.FW
+        self.place(F, F, int(self.fx - F / 2), int(self.fy - F / 2))
+        self.canvas.delete("all")
+        self.free = ("bottom", F / 2, F / 2)
         tuck = u > 0.75  # arms down, legs out for the landing
         self.draw_body(0, 0, "happy", 0, "normal" if tuck else "flail", -1 if tuck else int(self.t * 14) % 2,
                        blush=True)
@@ -1411,16 +1413,14 @@ class Pet:
             self.fx += self.vx * dt
             self.fy += self.vy * dt
             el = now - sm["t0"]
-            ox, oy = self.sky_frame()
-            cx, cy = self.fx - ox, self.fy - oy
-            self.free = ("bottom", cx, cy + math.sin(min(1.0, el / 0.18) * math.pi) * S * 0.6)
+            self.place(F, F, int(self.fx - F / 2), int(self.fy - F / 2))
+            self.canvas.delete("all")
+            self.free = ("bottom", F / 2, F / 2 + math.sin(min(1.0, el / 0.18) * math.pi) * S * 0.6)
             self.draw_body(0, 0, "happy", 0, "wave", -1, blush=True)
             self.free = None
             if self.bubble and now < self.bubble[1]:
-                self.bubble_at(self.bubble[0], cx, cy - 6 * S, "up", *self.sky_wh)
+                self.bubble_at(self.bubble[0], F / 2, F / 2 - 6 * S, "up", F, F)
             if el > 0.18:  # ...then inflate into the window (drawn on the big overlay from here on)
-                self.sky_cv.delete("all")
-                self.sky_used = False
                 self.canvas.delete("all")
                 self.start_panel((self.fx - 5 * S, self.fy - 5 * S, self.fx + 5 * S, self.fy + 3 * S))
                 sm.update(phase="inside")
@@ -1454,49 +1454,6 @@ class Pet:
             self.seen_target = self.watcher.target_id if self.watcher else 0
             self.action, self.next_action = None, now + 3
             self._geom = None
-
-    def make_sky(self):
-        """An always-open, fully see-through, click-through layer over the whole screen. While he's in
-        the air he's drawn on this instead of moving his own window every frame - moving a window costs
-        ~10-25ms a frame, redrawing here costs ~2ms - so flights stay at a steady 60fps."""
-        win = tk.Toplevel(self.root)
-        win.overrideredirect(True)
-        win.title("clawd-pet")
-        win.attributes("-topmost", True)
-        win.attributes("-transparentcolor", KEY)
-        win.config(bg=KEY)
-        cv = tk.Canvas(win, bg=KEY, highlightthickness=0, bd=0)
-        cv.pack(fill="both", expand=True)
-        self.sky, self.sky_cv = win, cv
-        self.sky_geom, self.sky_used, self.sky_linger = None, False, 0
-        self.fit_sky()
-        win.update_idletasks()
-        try:
-            user32 = ctypes.windll.user32
-            hwnd = user32.GetParent(win.winfo_id()) or win.winfo_id()
-            style = user32.GetWindowLongW(hwnd, -20)
-            user32.SetWindowLongW(hwnd, -20, style | 0x08000000 | 0x80 | 0x20)  # no focus, no alt-tab, click-through
-        except Exception as e:
-            log("sky exstyle failed", e)
-
-    def fit_sky(self):
-        u32 = ctypes.windll.user32
-        vx, vy, vw, vh = (u32.GetSystemMetrics(i) for i in (76, 77, 78, 79))  # the whole virtual screen
-        g = f"{vw}x{vh}+{vx}+{vy}"
-        if g != self.sky_geom:
-            self.sky_geom, self.sky_origin, self.sky_wh = g, (vx, vy), (vw, vh)
-            self.sky.geometry(g)
-            self.sky_cv.config(width=vw, height=vh)
-
-    def sky_frame(self):
-        """start a flight frame on the sky layer; returns its screen origin"""
-        if not self.sky_used:
-            self.sky_used = True
-            self.canvas.delete("all")  # his own window goes blank while he's in the air
-        self.sky_linger = 2
-        self.sky_cv.delete("all")
-        self.cv = self.sky_cv
-        return self.sky_origin
 
     def make_panel(self):
         win = tk.Toplevel(self.root)
@@ -2256,21 +2213,10 @@ class Pet:
                     self.come_back()
             else:
                 self.tick_idle(now, dt)
-            self.cv = self.canvas
-            in_air = self.mode in ("drag", "fall", "leap") or (self.mode == "summon" and self.sm
-                                                               and self.sm.get("phase") == "windup")
-            if self.sky_used and not in_air:
-                # landed: he's back in his own window - keep the flight layer a couple more frames so the
-                # hand-over overlaps instead of flickering
-                self.sky_linger -= 1
-                if self.sky_linger <= 0:
-                    self.sky_cv.delete("all")
-                    self.sky_used = False
             if int(self.t * 30) % 90 == 0:  # re-assert always-on-top every ~3s
                 self.root.attributes("-topmost", True)
                 self.hit.attributes("-topmost", True)
                 self.hit.lift()
-                self.sky.attributes("-topmost", True)
         except tk.TclError as e:
             if "destroyed" in str(e):  # quitting: stop quietly
                 return
