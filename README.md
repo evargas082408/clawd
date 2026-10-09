@@ -53,7 +53,7 @@ python notify.py quit    # exit
 
 | File | Purpose |
 |---|---|
-| `pet.py` | The pet: a transparent, always-on-top Tk window drawn as pixel art |
+| `pet.py` | The pet: a transparent, always-on-top Tk window drawn as pixel art. While it's flying (dragged, thrown, leaping) it's drawn on a full-screen, see-through, click-through layer instead, so flights run at a steady 60fps |
 | `notify.py` | Small client used by the hooks |
 | `hooks.example.json` | Claude Code hook configuration |
 
