@@ -4,8 +4,10 @@ Clawd - a tiny pixel Claude critter that lives on the edges of your screen.
 - Hides behind screen edges (you can see its little hands holding on),
   shuffles along the edges, peeks, pops up, waves, naps.
 - Hover it to pet it (happy eyes + hearts). Click it to make it hop.
-- When Claude Code needs your permission it drops down from the top of the
-  screen (by the camera) and dangles there until you deal with it.
+- Every Claude notification (permission, question, plan, error, done, waiting)
+  arrives as a gacha capsule: it drops down from the top of the screen (by the
+  camera), cracks the capsule open - the more Claude needs you, the rarer the
+  pull - and dangles there until you deal with it.
 - When the Claude app opens (or a new project starts) it leaps onto the app's
   input box and perches above the Send button. Drag it off to send it back.
 - Drop it in the middle of the screen while Claude is closed and a window grows
@@ -25,6 +27,7 @@ import random
 import socket
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 import tkinter as tk
@@ -111,6 +114,33 @@ SKINS = {  # body colours (orange, shade, highlight; midnight also lightens his 
     "midnight": {"O": "#3E4A6B", "D": "#2A3350", "L": "#6C7AA0", "K": "#E8E8F0"},
     "ghost": {"O": "#E9ECF2", "D": "#C3C8D3", "L": "#FFFFFF"},
 }
+
+# ---- notifications arrive as gacha capsules: the more Claude needs you, the rarer the pull
+NOTE_KINDS = {  # kind: (rank, tier, colour, headline)
+    "permission": (6, "LEGENDARY", "#E0A21A", "Claude needs your OK"),
+    "question": (5, "EPIC", "#9B5CF6", "Claude has a question"),
+    "plan": (5, "EPIC", "#9B5CF6", "Claude's plan is ready"),
+    "error": (4, "CURSED", "#D6404A", "Claude hit a snag"),
+    "done": (3, "RARE", "#3B7FE6", "Claude's done!"),
+    "waiting": (2, "UNCOMMON", "#3FA65A", "Claude's waiting on you"),
+    "info": (1, "COMMON", "#8D96A0", "news from Claude"),
+}
+TIER_BANNER = {"LEGENDARY": "*** LEGENDARY ***", "EPIC": "** EPIC **", "CURSED": "x_x CURSED x_x",
+               "RARE": "* RARE *", "UNCOMMON": "+ UNCOMMON +", "COMMON": "- common -"}
+NEEDS_YOU = ("permission", "question", "plan")  # settled as soon as you answer
+TEST_NOTES = {"permission": "Bash: npm install", "question": "Which database should we use?", "plan": "",
+              "error": "hit a rate limit", "done": "All tests pass and the fix is pushed.", "waiting": "",
+              "info": "logged in"}
+CAPSULE = [  # 8x8: k outline, c tier colour, d its shade, h shine, b band, w/g the white half
+    "..kkkk..",
+    ".kcccck.",
+    "kchcccdk",
+    "kcccccdk",
+    "kbbbbbbk",
+    "kwwwwwgk",
+    ".kwwwgk.",
+    "..kkkk..",
+]
 
 
 def log(*a):
@@ -773,7 +803,7 @@ class Pet:
         # idle, dragged and falling all share one square window size, so grabbing / landing only
         # moves the window and never resizes it (a resize briefly exposes unpainted pixels)
         self.CW, self.CH = 34 * S, 34 * S          # canonical canvas (edge along the bottom)
-        self.AW, self.AH = 46 * S, 34 * S          # alert canvas
+        self.AW, self.AH = 56 * S, 38 * S          # alert canvas
         self.FW = self.CW                          # free-floating canvas (dragged / thrown)
         self.free = None                           # (orientation, cx, cy) while floating
         self.GX = (self.CW - 14 * S) // 2          # sprite x inside canonical canvas
@@ -814,6 +844,7 @@ class Pet:
         self.menu = tk.Menu(root, tearoff=0)
         self.wear_menu = tk.Menu(self.menu, tearoff=0)
         self.skin_menu = tk.Menu(self.menu, tearoff=0)
+        self.test_menu = tk.Menu(self.menu, tearoff=0)
         self.startup_var = tk.BooleanVar(value=startup_enabled())
 
         now = time.time()
@@ -835,8 +866,11 @@ class Pet:
         self.particles = []
         self.hover, self.last_hover, self.next_heart = False, 0, 0
         self.away_until = 0
-        self.after_alert = None
-        self.pending_alert = None  # notification waiting to be delivered
+        self.notes = []             # Claude notifications you haven't dealt with yet
+        self.pending_alert = None   # the one waiting to be delivered
+        self.shown = None           # the one he's showing you
+        self.cap = None             # the capsule it comes in
+        self.next_note_check = 0.0
         self.perched = False        # sitting on the Claude app's input box
         self.perch_pt = None        # screen point on top of the input box, above Send
         self.perch_wanted_until = 0
@@ -950,7 +984,8 @@ class Pet:
 
     def bubble_at(self, lines, ax, ay, side, cw, ch, color=None):
         S = self.S
-        tw = max(self.font.measure(s) for s in lines)
+        lines = [ln if isinstance(ln, tuple) else (ln, None) for ln in lines]  # (text, colour)
+        tw = max(self.font.measure(s) for s, _ in lines)
         lh = self.font.metrics("linespace")
         pad = int(S * 1.2)
         bw, bh = tw + 2 * pad, lh * len(lines) + 2 * pad
@@ -968,9 +1003,9 @@ class Pet:
         self.rect(x + b, y, bw - 2 * b, bh, color or "T", canon=False)
         self.rect(x, y + b, bw, bh - 2 * b, color or "T", canon=False)
         self.rect(x + b, y + b, bw - 2 * b, bh - 2 * b, "W", canon=False)
-        for i, s in enumerate(lines):
+        for i, (s, col) in enumerate(lines):
             self.canvas.create_text(x + bw / 2, y + pad + lh * i + lh / 2, text=s, font=self.font,
-                                    fill=color or C["T"])
+                                    fill=C.get(col, col) if col else (color or C["T"]))
 
     def draw_body(self, ox, top, eyes, look, arms, legs_frame, blush, legs=True):
         """Draw the 14x10 critter with its top-left at canonical (ox, top). arms: 'normal'|'wave'|('grip', y)"""
@@ -1004,6 +1039,9 @@ class Pet:
             elif eyes == "annoyed":  # unimpressed: flat half-closed lids
                 self.rect(ex - S / 2, top + 2.5 * S, 2 * S, max(1, S / 3), "K")
                 self.rect(ex, top + 3 * S, S, S, "K")
+            elif eyes == "star":  # sparkly eyes: a rare pull!
+                self.rect(ex, top + 2 * S, S, 2 * S, "S")
+                self.rect(ex, top + 2 * S, S / 2 + 1, S / 2 + 1, "W")
         if blush:
             self.rect(ox + 3 * S, top + 4 * S, S, S, "P")
             self.rect(ox + 10 * S, top + 4 * S, S, S, "P")
@@ -1055,10 +1093,11 @@ class Pet:
         if self.mode == "alert":
             focus_claude()
             self.leave_alert("on it!")
+            self.drop_notes()
             return
         if self.pending_alert is not None and _e is not None:
             focus_claude()
-            self.pending_alert = None
+            self.drop_notes()
             self.say("on it!", 1.2)
             return
         if _e is not None and self.mode == "idle":
@@ -1372,7 +1411,11 @@ class Pet:
         m.add_cascade(label="Accessory", menu=w)
         m.add_separator()
         m.add_command(label="Pet Clawd", command=lambda: self.q.put(("hi", "")))
-        m.add_command(label="Test permission alert", command=lambda: self.q.put(("alert", "Bash")))
+        t = self.test_menu
+        t.delete(0, "end")
+        for kind, (_, tier, _, _) in NOTE_KINDS.items():
+            t.add_command(label=f"{tier.lower()}  \u00b7  {kind}", command=lambda k=kind: self.q.put(("test", k)))
+        m.add_cascade(label="Test a notification", menu=t)
         m.add_command(label="Sit on Claude's input box", command=lambda: self.q.put(("perch", "")))
         m.add_command(label="Hide for 10 minutes", command=self.go_away)
         m.add_checkbutton(label="Start with Windows", variable=self.startup_var, command=self.toggle_startup)
@@ -1864,34 +1907,22 @@ class Pet:
             except queue.Empty:
                 return
             log("msg", cmd, detail)
-            if cmd == "alert":
-                if claude_focused():  # you're already looking at Claude
-                    continue
-                if self.mode == "alert":
-                    self.alert_detail = (detail or "").strip()[:22] or self.alert_detail
-                    self.alert_leaving = False
-                else:
-                    if self.mode == "away":
-                        self.come_back()
-                    # idle: hide first, then drop in at the top (or tell you in place if you're petting it)
-                    self.pending_alert = detail or ""
-                    self.pending_t0 = time.time()
-                    self.pending_edge = None
-                    self.action = None
-                    self.sleeping = False
-                    self.wave = False
-                    self.target = self.pos
-            elif cmd == "clear":
-                if self.pending_alert is not None and time.time() - self.pending_t0 > 1.5:
-                    self.pending_alert = None
-                if self.mode == "alert" and time.time() - self.alert_t0 > 1.5:
-                    self.leave_alert("thanks!")
+            if cmd == "note":
+                try:
+                    n = json.loads(detail)
+                    if not isinstance(n, dict):
+                        raise ValueError
+                except ValueError:
+                    n = {"kind": "info", "text": detail}
+                self.add_note(str(n.get("kind") or "info"), str(n.get("text") or ""), str(n.get("sid") or ""))
+            elif cmd == "alert":  # older hook setups
+                self.add_note("permission", detail, "")
             elif cmd == "done":
-                if self.mode == "alert":
-                    self.after_alert = "done"
-                    self.leave_alert("thanks!")
-                elif not claude_focused():
-                    self.cheer()
+                self.add_note("done", "", "")
+            elif cmd == "test":  # from the menu
+                self.add_note(detail, TEST_NOTES.get(detail, ""), "", test=True)
+            elif cmd in ("clear", "seen"):  # you answered Claude / sent it a message
+                self.settle(detail, needs_only=(cmd == "clear"))
             elif cmd == "hi":
                 if self.mode == "away":
                     self.come_back()
@@ -1942,21 +1973,200 @@ class Pet:
         self.next_action = self.action_until + random.uniform(2, 4)
 
     # ---------- alert mode
-    def start_alert(self, detail):
+    # ---------- notifications (each one arrives as a gacha capsule)
+    def add_note(self, kind, text, sid, test=False):
+        if kind not in NOTE_KINDS:
+            kind = "info"
+        if not test and claude_focused():  # you're already looking at Claude
+            return
+        now = time.time()
+        text = " ".join(text.split())[:200]
+        if kind == "done" and sid:  # that session's turn is over: whatever it was asking about is settled
+            self.notes = [n for n in self.notes if not (n["sid"] == sid and n["kind"] in NEEDS_YOU)]
+        for n in list(self.notes):
+            if n["sid"] != sid or n["test"] != test:
+                continue
+            fresh = now - n["t"] < 5
+            # the same thing reported twice: a permission request also sends a notification,
+            # "waiting for you" follows "done", a question can show up as a permission prompt
+            if (n["kind"] == kind and fresh) or (kind == "waiting" and n["kind"] == "done") \
+                    or (kind == "permission" and n["kind"] in ("question", "plan") and fresh):
+                if text and not n["text"]:
+                    n["text"] = text
+                return
+            if n["kind"] == "permission" and kind in ("question", "plan") and fresh:
+                n.update(kind=kind, text=text or n["text"])
+                return
+            if n["kind"] == kind:  # a newer one of the same: replaces it
+                self.notes.remove(n)
+        note = {"kind": kind, "text": text, "sid": sid, "t": now, "opened": False, "test": test}
+        self.notes.append(note)
+        self.notes_changed()
+        self.present(note)
+
+    def has_note(self, note):
+        return note is not None and any(n is note for n in self.notes)
+
+    def best_note(self):
+        return max(self.notes, key=lambda n: (NOTE_KINDS[n["kind"]][0], n["t"])) if self.notes else None
+
+    def present(self, note):
+        """a new notification: get it to you"""
+        if self.mode == "away":
+            self.come_back()
+        if self.mode == "alert":
+            cur = self.shown
+            if self.alert_leaving or not self.has_note(cur) \
+                    or NOTE_KINDS[note["kind"]][0] >= NOTE_KINDS[cur["kind"]][0]:
+                if not self.alert_leaving:
+                    self.alert_v -= 25 * self.S  # a little bounce: another one!
+                self.alert_leaving = False
+                self.show_note(note)
+            return  # (anything less important waits its turn: "+1 more")
+        # hide first, then drop in at the top (or open it in place if you're petting him)
+        self.pending_alert = self.best_note()
+        self.pending_edge = None
+        self.action = None
+        self.sleeping = False
+        self.wave = False
+        self.target = self.pos
+
+    def show_note(self, note):
+        self.shown = note
+        self.cap = None if note["opened"] else {"note": note, "t0": time.time(), "pop": None}
+
+    def settle(self, sid, needs_only):
+        """you dealt with something in Claude: drop what it settles"""
+        now = time.time()
+
+        def settled(n):
+            if n["test"] or now - n["t"] < 1.5:  # (hooks can land a moment out of order)
+                return False
+            if sid and n["sid"] and n["sid"] != sid:
+                return False
+            return n["kind"] in NEEDS_YOU or not needs_only
+        self.notes = [n for n in self.notes if not settled(n)]
+        self.notes_changed()
+
+    def drop_notes(self):
+        self.notes = []
+        self.notes_changed()
+
+    def notes_changed(self, bye="thanks!"):
+        if self.pending_alert is not None and not self.has_note(self.pending_alert):
+            self.pending_alert = self.best_note()
+        if self.mode == "alert":
+            if not self.alert_leaving:
+                if not self.notes:
+                    self.leave_alert(bye)
+                elif not self.has_note(self.shown):
+                    self.show_note(self.best_note())
+        elif self.cap and not self.has_note(self.cap["note"]):
+            self.cap = None
+
+    def tick_notes(self, now):
+        if not self.notes or now < self.next_note_check:
+            return
+        self.next_note_check = now + 0.25
+        focused = claude_focused()  # you switched to Claude: job done
+        keep = [n for n in self.notes if ((now - n["t"] < 12) if n["test"] else not focused)]
+        if len(keep) != len(self.notes):
+            self.notes = keep
+            self.notes_changed("go go!" if focused else "bye!")
+
+    def note_lines(self, note, hov=False):
+        _, tier, col, headline = NOTE_KINDS[note["kind"]]
+        lines = [(TIER_BANNER[tier], col), (headline, "T")]
+        text = note["text"]
+        if text:
+            if note["kind"] == "permission":
+                text = "-> " + text
+            elif note["kind"] != "error":
+                text = '"' + text + '"'
+            lines += [(ln, "T") for ln in textwrap.wrap(text, 30, max_lines=2, placeholder="...")]
+        more = sum(1 for n in self.notes if n is not note)
+        if more:
+            lines.append((f"+{more} more", "#8D96A0"))
+        if hov:
+            lines.append(("(click to open Claude)", "#8D96A0"))
+        return lines
+
+    def pop_capsule(self, now, at, canon):
+        """crack the capsule open: burst, sparkly eyes, and the notification inside"""
+        cap = self.cap
+        cap["pop"], cap["at"] = now, at
+        note = cap["note"]
+        note["opened"] = True
+        rank, tier, col, _ = NOTE_KINDS[note["kind"]]
+        x, y = at
+        n = {6: 16, 5: 12, 4: 10, 3: 8}.get(rank, 6)
+        for i in range(n):
+            a = i / n * 2 * math.pi + random.uniform(-0.2, 0.2)
+            v = random.uniform(12, 20) * self.S
+            self.particles.append({"x": x, "y": y, "vx": math.cos(a) * v, "vy": math.sin(a) * v, "life": 1.0,
+                                   "kind": "steam" if tier == "CURSED" else "spark", "abs": not canon,
+                                   "col": "#8C7A99" if tier == "CURSED" else col})
+        if tier in ("LEGENDARY", "EPIC"):
+            self.eyes_fx, self.eyes_fx_until = "star", now + 1.6
+        elif tier == "CURSED":
+            self.eyes_fx, self.eyes_fx_until = "annoyed", now + 1.6
+        else:
+            self.eyes_fx, self.eyes_fx_until = "happy", now + 1.0
+
+    def draw_capsule(self, cx, cy, col, ps, canon, half=None):
+        """the gacha capsule, 8x8 pixels centred on (cx, cy); half = "top"/"bottom" for the flying pieces"""
+        pal = {"k": "T", "c": col, "d": mix(col, "#101010", 0.35), "h": "W", "b": "#4A403A",
+               "w": "#F4F1EC", "g": "#C9C2BA"}
+        rows = range(0, 4) if half == "top" else range(4, 8) if half == "bottom" else range(8)
+        for j in rows:
+            row = CAPSULE[j]
+            i = 0
+            while i < len(row):
+                k = i
+                while k < len(row) and row[k] == row[i]:
+                    k += 1
+                if row[i] != ".":
+                    self.rect(cx + (i - 4) * ps, cy + (j - 4) * ps, (k - i) * ps, ps, pal[row[i]], canon=canon)
+                i = k
+
+    def draw_pop(self, now, canon):
+        """the capsule bursting: halves flying apart, rays of light for the good stuff"""
+        cap = self.cap
+        if not cap or cap["pop"] is None:
+            return
+        u = now - cap["pop"]
+        if u > 0.8:
+            return
+        S = self.S
+        _, tier, col, _ = NOTE_KINDS[cap["note"]["kind"]]
+        x, y = cap["at"]
+        if tier in ("LEGENDARY", "EPIC"):
+            sz = max(1.0, S * (1 - u / 0.8))
+            for k in range(8):
+                a = k * math.pi / 4 + u * 1.5
+                for step in (0.0, 1.8):
+                    rr = (3 + 16 * u + step) * S
+                    self.rect(x + math.cos(a) * rr - sz / 2, y + math.sin(a) * rr - sz / 2, sz, sz,
+                              "S" if tier == "LEGENDARY" else col, canon=canon)
+        if u < 0.5:
+            g = 110 * S
+            self.draw_capsule(x + 12 * S * u, y - 24 * S * u + g * u * u / 2, col, S, canon, half="top")
+            self.draw_capsule(x - 5 * S * u, y - 5 * S * u + g * u * u / 2, col, S, canon, half="bottom")
+
+    # ---------- alert mode
+    def start_alert(self, note):
         if self.mode == "away":
             self.come_back()
         self.set_size(self.S_big, now_=True)
         now = time.time()
         self.alert_t0 = now
-        self.alert_detail = (detail or "").strip()[:22]
+        self.show_note(note)
         if self.mode != "alert":
             self.mode = "alert"
             self.alert_drop, self.alert_v = -16.0 * self.S, 0.0
-            self.alert_leaving = False
             self.particles = []
             self.bubble = None
-        else:
-            self.alert_leaving = False
+        self.alert_leaving = False
 
     def leave_alert(self, text):
         if self.mode != "alert" or self.alert_leaving:
@@ -1969,11 +2179,6 @@ class Pet:
         S = self.S
         sw = ctypes.windll.user32.GetSystemMetrics(0)
         self.place(self.AW, self.AH, sw // 2 - self.AW // 2, 0)
-        if not self.alert_leaving and now > getattr(self, "next_focus_check", 0):
-            self.next_focus_check = now + 0.25
-            if claude_focused():  # you switched to Claude - job done
-                self.after_alert = None
-                self.leave_alert("go go!")
         # spring drop / climb
         goal = 0.0
         if self.alert_leaving and now - self.alert_leave_t > 0.9:
@@ -1982,6 +2187,7 @@ class Pet:
         self.alert_drop += self.alert_v * dt
         if self.alert_leaving and self.alert_drop < -15 * S and now - self.alert_leave_t > 1.0:
             self.mode = "idle"
+            self.shown = self.cap = None
             if self.perched:  # back to his spot on Claude's input box
                 self.edge = "bottom"
                 self.set_size(self.S_small, now_=True)
@@ -1996,42 +2202,60 @@ class Pet:
             self.action = None
             self.particles = []
             self._geom = None
-            if self.after_alert == "done":
-                self.after_alert = None
-                self.cheer()
             return
 
         c = self.canvas
         c.delete("all")
+        note, cap = self.shown, self.cap
+        _, tier, col, _ = NOTE_KINDS[note["kind"] if note else "info"]
         swing = math.sin(self.t * 2.4) * S * 1.3 if not self.alert_leaving else 0
         ox = self.AW / 2 - 7 * S + swing
         top = self.alert_drop
-        # hover check on the dangling body
+        holding = cap is not None and cap["pop"] is None and not self.alert_leaving
+        # the capsule, held out in his free hand and rattling now and then
+        rattle = math.sin(self.t * 45) * 0.5 * S if holding and (now - cap["t0"]) % 0.7 < 0.35 else 0
+        ccx, ccy = ox + 18 * S + rattle, top + 9 * S
+        # hover check on the dangling body (and the capsule)
         px, py = self.root.winfo_pointerxy()
         wx, wy = self.root.winfo_rootx(), self.root.winfo_rooty()
-        hov = ox - S <= px - wx <= ox + 15 * S and top <= py - wy <= top + 12 * S
-        self.set_hit((wx + ox - S, wy, wx + ox + 16 * S, wy + max(S, top + 12 * S)))
+        right = ox + (23 if holding else 16) * S
+        hov = ox - S <= px - wx <= right and top <= py - wy <= top + 13 * S
+        self.set_hit((wx + ox - S, wy, wx + right, wy + max(S, top + 13 * S)))
+        if holding and self.alert_drop > -3 * S and (hov or now - cap["t0"] > 1.3):
+            self.pop_capsule(now, (ccx, ccy), canon=False)  # open it!
+            holding = False
+        fx = self.eyes_fx if now < self.eyes_fx_until else None
 
-        # arms reaching up, hands holding the top edge
-        for cx in (1, 11):
+        # arms reaching up, hands holding the top edge (just one while the other holds the capsule)
+        for cx in ((1,) if holding else (1, 11)):
             self.rect(ox + cx * S, top, 2 * S, S, "L", canon=False)
             self.rect(ox + (cx + (1 if cx == 1 else 0)) * S, top + S, S, S, "O", canon=False)
         # body rows 2..9
         for j, row in enumerate(BODY):
             for i, ch in enumerate(row):
                 self.rect(ox + (2 + i) * S, top + (2 + j) * S, S, S, ch, canon=False)
-        # big worried eyes
+        if holding:
+            self.rect(ox + 12 * S, top + 6 * S, 2 * S, S, "O", canon=False)
+            self.rect(ox + 12 * S, top + 7 * S, 2 * S, S, "D", canon=False)
+        # eyes
         blink = (self.t % 3.1) < 0.12
         for ex in (4, 8):
-            if blink and not self.alert_leaving:
+            if fx == "star":  # sparkly: a rare pull!
+                self.rect(ox + ex * S, top + 4 * S, 2 * S, 2 * S, "S", canon=False)
+                self.rect(ox + ex * S, top + 4 * S, S // 2 + 1, S // 2 + 1, "W", canon=False)
+            elif fx == "annoyed":  # cursed...
+                self.rect(ox + ex * S, top + 5 * S, 2 * S, S, "K", canon=False)
+            elif blink and not self.alert_leaving:
                 self.rect(ox + ex * S, top + 5 * S, 2 * S, S // 2 + 1, "K", canon=False)
-            elif self.alert_leaving or hov:
+            elif self.alert_leaving or hov or fx == "happy":
                 self.rect(ox + ex * S, top + 5 * S, S, S, "K", canon=False)
                 self.rect(ox + (ex + 1) * S, top + 4 * S, S, S, "K", canon=False)
+            elif holding:  # eyeing the capsule
+                self.rect(ox + (ex + 1) * S, top + 4 * S, S, 2 * S, "K", canon=False)
             else:
                 self.rect(ox + ex * S, top + 4 * S, 2 * S, 2 * S, "K", canon=False)
                 self.rect(ox + ex * S, top + 4 * S, S // 2 + 1, S // 2 + 1, "W", canon=False)
-        if hov or self.alert_leaving:
+        if hov or self.alert_leaving or fx in ("star", "happy"):
             self.rect(ox + 3 * S, top + 6 * S, S, S, "P", canon=False)
             self.rect(ox + 10 * S, top + 6 * S, S, S, "P", canon=False)
         # kicking legs
@@ -2039,24 +2263,24 @@ class Pet:
         for idx, cx in enumerate((3, 5, 8, 10)):
             hgt = 2 * S if (idx % 2) == kick else S
             self.rect(ox + cx * S, top + 10 * S, S, hgt, "D", canon=False)
-        # flashing "!"
-        if not self.alert_leaving and int(self.t * 3) % 2 == 0:
-            ex = ox + 15 * S
-            self.rect(ex, top + 2 * S, S, 3 * S, "R", canon=False)
-            self.rect(ex, top + 6 * S, S, S, "R", canon=False)
-        # speech
-        if self.alert_leaving:
-            lines = [self.alert_bye]
-        elif hov:
-            lines = ["click me to", "open Claude"]
+        if holding:
+            self.draw_capsule(ccx, ccy, col, S, canon=False)
+            if random.random() < 0.1:
+                self.spawn("spark", absolute=(ccx + random.uniform(-5, 5) * S, ccy - 4 * S), col=col)
         else:
-            lines = ["psst! Claude needs", "your permission"]
-            if self.alert_detail:
-                lines.append("-> " + self.alert_detail)
-        self.bubble_at(lines, self.AW / 2, top + 13 * S, "down", self.AW, self.AH)
+            self.draw_pop(now, canon=False)
+            if not self.alert_leaving and int(self.t * 3) % 2 == 0:  # flashing "!"
+                ex = ox + 15 * S
+                self.rect(ex, top + 2 * S, S, 3 * S, col, canon=False)
+                self.rect(ex, top + 6 * S, S, S, col, canon=False)
         if self.alert_leaving and random.random() < 0.3:
             self.spawn("heart", absolute=(ox + 7 * S, top + 6 * S))
         self.draw_particles(dt)
+        # speech (on top of the sparkles, so it stays readable)
+        if self.alert_leaving:
+            self.bubble_at([self.alert_bye], self.AW / 2, top + 13 * S, "down", self.AW, self.AH)
+        elif not holding and note:
+            self.bubble_at(self.note_lines(note, hov), self.AW / 2, top + 13 * S, "down", self.AW, self.AH, col)
 
     # ---------- idle mode
     def random_pos(self):
@@ -2232,16 +2456,16 @@ class Pet:
             self.next_action = now + random.uniform(1.5, 3)
 
         if self.pending_alert is not None:
-            if now > getattr(self, "next_focus_check", 0):
-                self.next_focus_check = now + 0.25
-                if claude_focused():
-                    self.pending_alert = None
-        if self.pending_alert is not None:
             pa = self.pending_alert
             if self.hover:
-                # you're playing with it: tell you right here
-                lines = ["psst! Claude needs", "your permission"] + (["-> " + pa] if pa else []) + ["(click me)"]
-                self.bubble = (lines, now + 0.5)
+                # you're playing with him: crack it open right here
+                if self.cap is None or self.cap["note"] is not pa:
+                    self.show_note(pa)
+                cap = self.cap
+                if cap and cap["pop"] is None and now - cap["t0"] > 0.6:
+                    self.pop_capsule(now, (self.GX + 18 * S, self.CH - self.p - self.jump + 4 * S), canon=True)
+                if not cap or cap["pop"] is not None:
+                    self.bubble = (self.note_lines(pa, hov=True), now + 0.5, NOTE_KINDS[pa["kind"]][2])
             else:
                 # duck out of sight, then pop up at the top of the screen
                 self.pgoal = self.HIDE
@@ -2381,9 +2605,14 @@ class Pet:
         blush = (self.hover and not self.refusing) or self.action == "cheer" or mood == "smitten"
         if self.p > self.HIDE + 1 or not gripping:
             self.draw_body(self.GX, top, eyes, look, arms, legs_frame, blush=blush)
-        if self.pending_alert is not None and self.hover and int(self.t * 3) % 2 == 0:
-            self.rect(self.GX + 15 * S, top + 0 * S, S, 3 * S, "R")
-            self.rect(self.GX + 15 * S, top + 4 * S, S, S, "R")
+        cap = self.cap
+        if self.pending_alert is not None and self.hover and cap is not None:  # the capsule, in his hand
+            if cap["pop"] is None:
+                rattle = math.sin(self.t * 45) * 0.5 * S if (now - cap["t0"]) % 0.7 < 0.35 else 0
+                self.draw_capsule(self.GX + 18 * S + rattle, top + 4 * S, NOTE_KINDS[cap["note"]["kind"]][2], S,
+                                  canon=True)
+            else:
+                self.draw_pop(now, canon=True)
         visible = self.p > self.EYES - S
         hat = max(0, -min(g[1] for g in GEAR[self.wear])) if self.wear in GEAR else 0  # headgear height
         meter = visible and (now < self.meter_until or (self.hover and not self.refusing))
@@ -2450,6 +2679,7 @@ class Pet:
         self.t += dt
         try:
             self.handle_messages()
+            self.tick_notes(now)
             if self.watcher:
                 self.watcher.busy = self.mode in ("drag", "fall", "leap", "summon")
                 self.watcher.want = (self.perched or self.mode in ("leap", "summon")

@@ -1,6 +1,6 @@
 # Clawd
 
-A tiny pixel desktop pet for Windows that lives on the edges of your screen and taps you on the shoulder when Claude Code needs your permission.
+A tiny pixel desktop pet for Windows that lives on the edges of your screen and delivers every Claude Code notification to you as a gacha capsule.
 
 > [!WARNING]
 > **Use at your own risk: Clawd is an experimental, untested hobby project. Expect bugs.**
@@ -19,10 +19,22 @@ A tiny pixel desktop pet for Windows that lives on the edges of your screen and 
   - Clawd has a love meter (0-100%, shown as 5 pixel hearts over his head). Petting him (hovering) slowly fills it, clicking him adds a little, and ignoring him drains it. It's saved in `state.json`.
   - His mood follows his love: smitten (blushing, floating hearts), happy, meh, grumpy (unimpressed eyes, crossed arms, steam, sassy lines, refuses pets until you keep at it) and sulky (a little rain cloud, hides from you, ignores clicks). Spam-clicking annoys him, and throwing him around is fun when he likes you and rude when he doesn't.
 - **Skins & accessories:** right-click > **Skin** picks his colours (classic, golden, mint, berry, ocean, grape, midnight, ghost) and **Accessory** puts something on him (crown, party hat, bow, flower, sunglasses, halo). Your pick is remembered.
-- **Right-click** for a menu: his love and mood, skin, accessory, test alert, hide for 10 minutes, start with Windows, quit.
-- **Permission alerts:** when Claude Code asks for permission, Clawd drops down from the top-center of the screen and dangles there until you respond. Click it to jump to the Claude window.
-- **Done cheer:** when Claude finishes a reply, Clawd pops up and cheers.
-- Stays quiet if you're already looking at the Claude desktop app or a claude.ai tab.
+- **Right-click** for a menu: his love and mood, skin, accessory, test a notification (any rarity), hide for 10 minutes, start with Windows, quit.
+- **Gacha notifications:** every Claude Code notification comes as a gacha capsule. Clawd ducks out of sight, drops down from the top-center of the screen (by the camera) hanging on with one hand and holding the capsule out with the other, rattles it, and cracks it open (or hover to open it right away). The more Claude needs you, the rarer the pull:
+
+  | Rarity | Notification |
+  |---|---|
+  | LEGENDARY (gold, rays of light, sparkly eyes) | Claude needs your permission, with what it wants to run |
+  | EPIC (purple) | Claude has a question for you, or its plan is ready for review |
+  | CURSED (red) | Claude hit an error (rate limit, overloaded, login...) |
+  | RARE (blue) | Claude finished, with the start of its reply |
+  | UNCOMMON (green) | Claude has been waiting on you for a while |
+  | common (grey) | anything else Claude wants to tell you |
+
+  - He dangles there until you deal with it: answer in Claude, or click him to jump to the Claude window. Answering a permission prompt or question, or sending that session a message, settles it on its own.
+  - Several at once: he shows the rarest and counts the rest ("+2 more"). A rarer one arriving drops in as a fresh capsule.
+  - If you're petting him when one arrives, he cracks the capsule open right there in his hands.
+  - Stays quiet if you're already looking at the Claude desktop app or a claude.ai tab.
 - **Sits on Claude's message box:** whenever the Claude app opens, or a new project/session starts, Clawd hops onto the app's message box, shrinking to a tiny size on the way, and perches right above the Send button, peeking over it.
   - It glides along with the box as it grows while you type, and when you move or resize the window, and ducks behind the box when you switch to another app.
   - With several tabs open (several message boxes), it hops to the one you're typing in.
@@ -43,15 +55,19 @@ A tiny pixel desktop pet for Windows that lives on the edges of your screen and 
 3. Right-click Clawd and tick **Start with Windows** if you want it at login.
 4. Add the hooks from [`hooks.example.json`](hooks.example.json) to `~/.claude/settings.json`. Change the Python and repo paths to match your machine.
 
-`notify.py` is what the hooks call. It sends a message to the running pet over `127.0.0.1:47863` and starts the pet if it isn't running yet.
+`notify.py` is what the hooks call. It reads the hook's JSON, works out what kind of notification it is, sends it to the running pet over `127.0.0.1:47863`, and starts the pet if it isn't running yet.
 
 ```
-python notify.py alert   # dangle from the top of the screen
-python notify.py clear   # dismiss the alert
-python notify.py done    # celebrate
+python notify.py note    # (from a hook) deliver this notification as a capsule
+python notify.py clear   # (from a hook) a tool ran: that session's permission prompt is settled
+python notify.py seen    # (from a hook) you messaged that session: all its notifications are settled
+python notify.py alert   # permission capsule (also works by hand)
+python notify.py done    # "Claude's done" capsule
 python notify.py hi      # say hi
 python notify.py quit    # exit
 ```
+
+To try every rarity without waiting for Claude, right-click Clawd > **Test a notification**.
 
 ## Files
 

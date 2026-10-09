@@ -8,7 +8,7 @@
             "command": "C:/Path/To/Python/python.exe",
             "args": [
               "C:/path/to/claude-pet/notify.py",
-              "alert"
+              "note"
             ],
             "async": true,
             "timeout": 10
@@ -18,14 +18,45 @@
     ],
     "Notification": [
       {
-        "matcher": "permission_prompt",
         "hooks": [
           {
             "type": "command",
             "command": "C:/Path/To/Python/python.exe",
             "args": [
               "C:/path/to/claude-pet/notify.py",
-              "alert"
+              "note"
+            ],
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:/Path/To/Python/python.exe",
+            "args": [
+              "C:/path/to/claude-pet/notify.py",
+              "note"
+            ],
+            "async": true,
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:/Path/To/Python/python.exe",
+            "args": [
+              "C:/path/to/claude-pet/notify.py",
+              "note"
             ],
             "async": true,
             "timeout": 10
@@ -49,7 +80,7 @@
         ]
       }
     ],
-    "UserPromptSubmit": [
+    "PostToolUseFailure": [
       {
         "hooks": [
           {
@@ -65,7 +96,7 @@
         ]
       }
     ],
-    "Stop": [
+    "UserPromptSubmit": [
       {
         "hooks": [
           {
@@ -73,7 +104,7 @@
             "command": "C:/Path/To/Python/python.exe",
             "args": [
               "C:/path/to/claude-pet/notify.py",
-              "done"
+              "seen"
             ],
             "async": true,
             "timeout": 10
