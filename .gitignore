@@ -1,3 +1,5 @@
 pet.log
 __pycache__/
 *.pyc
+state.json
+state.json.tmp

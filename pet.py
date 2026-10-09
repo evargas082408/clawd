@@ -16,6 +16,7 @@ Controlled over localhost TCP by notify.py (called from Claude Code hooks).
 """
 import base64
 import collections
+import json
 import ctypes
 import math
 import os
@@ -32,6 +33,8 @@ import tkinter.font as tkfont
 PORT = 47863
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOG = os.path.join(HERE, "pet.log")
+STATE = os.path.join(HERE, "state.json")  # remembers where Claude's window lives and how long it takes to open
+_state_lock = threading.Lock()
 
 KEY = "#000000"  # transparent colour key: pure black, so any not-yet-painted area is see-through too
 C = {
@@ -76,6 +79,27 @@ def log(*a):
             f.write(time.strftime("%H:%M:%S ") + " ".join(str(x) for x in a) + "\n")
     except Exception:
         pass
+
+
+def load_state():
+    try:
+        with open(STATE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_state(**kv):
+    with _state_lock:
+        st = load_state()
+        st.update(kv)
+        try:
+            tmp = STATE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(st, f)
+            os.replace(tmp, STATE)
+        except Exception as e:
+            log("save_state failed", repr(e))
 
 
 # ---------------------------------------------------------------- win32 bits
@@ -323,6 +347,24 @@ def capture_window(h):
         u32.ReleaseDC(None, sdc)
 
 
+def window_painted(h):
+    """True once the window shows real content (text etc.), not just a blank loading surface."""
+    cap = capture_window(h)
+    if not cap:
+        return False
+    buf, W, H, _, _ = cap
+    colours, bright, n = set(), 0, 0
+    for gy in range(1, 30):
+        for gx in range(1, 40):
+            i = ((H * gy // 30) * W + (W * gx // 40)) * 4
+            b, g, r = buf[i], buf[i + 1], buf[i + 2]
+            colours.add((r // 24, g // 24, b // 24))
+            bright += (r + g + b) > 360
+            n += 1
+    # a blank loading surface is one flat colour; real UI has text and accents on it
+    return len(colours) >= 3 or 0 < bright < 0.6 * n
+
+
 def orange_critter(buf, W, H, x0, y0, x1, y1, scale):
     """Is there a solid, critter-sized blob of Claude orange in this part of the image?
     (that's the app's own little Clawd, which shows on a brand-new chat)"""
@@ -562,6 +604,7 @@ class ClaudeWatcher(threading.Thread):
         self.target_key = None
         self.pending_key, self.pending_since = None, 0.0
         self.gen = None
+        self.saved_rect, self.last_save = None, 0.0
 
     @staticmethod
     def key(c):  # identity of a box that survives it growing upward while you type
@@ -623,6 +666,12 @@ class ClaudeWatcher(threading.Thread):
                     self.q.put(("claude_closed", ""))
                 self.hwnd = h
                 front = claude_in_front()
+                if h and not is_iconic(h) and time.time() - self.last_save > 3:
+                    self.last_save = time.time()
+                    vr = window_rect(h, visible=True)
+                    if vr and vr != self.saved_rect and vr[2] - vr[0] > 300 and vr[3] - vr[1] > 200:
+                        self.saved_rect = vr
+                        save_state(rect=list(vr))  # so opening it can grow straight into that spot
                 if h and self.want and not is_iconic(h):
                     found = self.locator.locate(h)
                     r = window_rect(h)
@@ -1343,8 +1392,9 @@ class Pet:
     # ---------- summoning the Claude app: Clawd inflates into its window
     def start_summon(self):
         self.set_size(self.S_big, now_=True)
+        open_claude()  # start the app the instant you let go - it loads while he inflates
         self.mode = "summon"
-        self.sm = {"phase": "windup", "t0": time.time()}
+        self.sm = {"phase": "windup", "t0": time.time(), "t_open": time.time()}
         self.particles = []
         self.set_hit(None)
         self.say("opening Claude!", 1.0)
@@ -1360,20 +1410,19 @@ class Pet:
             el = now - sm["t0"]
             self.place(F, F, int(self.fx - F / 2), int(self.fy - F / 2))
             self.canvas.delete("all")
-            self.free = ("bottom", F / 2, F / 2 + math.sin(min(1.0, el / 0.3) * math.pi) * S * 0.6)
+            self.free = ("bottom", F / 2, F / 2 + math.sin(min(1.0, el / 0.18) * math.pi) * S * 0.6)
             self.draw_body(0, 0, "happy", 0, "wave", -1, blush=True)
             self.free = None
             if self.bubble and now < self.bubble[1]:
                 self.bubble_at(self.bubble[0], F / 2, F / 2 - 6 * S, "up", F, F)
-            if el > 0.3:  # ...then inflate into the window (drawn on the big overlay from here on)
-                open_claude()
+            if el > 0.18:  # ...then inflate into the window (drawn on the big overlay from here on)
                 self.canvas.delete("all")
                 self.start_panel((self.fx - 5 * S, self.fy - 5 * S, self.fx + 5 * S, self.fy + 3 * S))
-                sm.update(phase="inside", t_open=now)
+                sm.update(phase="inside")
             return
         self.canvas.delete("all")
         pn = self.pan
-        if pn and pn["phase"] == "hold" and now - sm["t_open"] > 16:  # the app never showed up
+        if pn and pn["phase"] == "grow" and now - sm["t_open"] > 16:  # the app never showed up
             sm["failed"] = True
             self.pan_fade()
         if pn is None:
@@ -1422,42 +1471,88 @@ class Pet:
         self.panel.deiconify()
         self.root.lift()
         self.hit.lift()
+        st = load_state()
         tw, th = int(W * 0.7), int(H * 0.76)
         to = (l + (W - tw) // 2, t + (H - th) // 2, l + (W + tw) // 2, t + (H + th) // 2)
+        rr = st.get("rect")
+        if (isinstance(rr, list) and len(rr) == 4 and rr[2] - rr[0] > 300 and rr[3] - rr[1] > 200
+                and rr[0] < r and rr[2] > l and rr[1] < b and rr[3] > t):
+            to = tuple(rr)  # grow straight into where Claude's window will appear
+        try:
+            E = max(0.7, min(3.5, float(st.get("launch", 1.6)) * 0.9))  # land about when the app shows up
+        except (TypeError, ValueError):
+            E = 1.4
         self.pan = {"phase": "grow", "t0": time.time(), "from": body, "to": to, "cur": body,
-                    "origin": (l, t), "m": 0.0, "limb": 1.0}
+                    "origin": (l, t), "m": 0.0, "limb": 1.0, "E": E}
 
     def pan_fade(self):
         if self.pan and self.pan["phase"] != "fade":
             self.pan.update(phase="fade", t0=time.time())
+
+    def note_launch(self, now):
+        """remember how long Claude took to show its window, so next time the animation lands on time"""
+        t_open = (self.sm or {}).get("t_open")
+        if t_open and 0.2 < now - t_open < 15:
+            try:
+                old = float(load_state().get("launch", now - t_open))
+            except (TypeError, ValueError):
+                old = now - t_open
+            save_state(launch=round(old * 0.5 + (now - t_open) * 0.5, 2))
+
+    def watch_paint(self, pn):
+        """background check: has the app drawn itself yet? (so we never reveal a blank window)"""
+        def run():
+            end = time.time() + 3.0
+            while time.time() < end and self.pan is pn:
+                if window_painted(pn["hwnd"]):
+                    break
+                time.sleep(0.12)
+            pn["painted"] = True
+        threading.Thread(target=run, daemon=True).start()
 
     def tick_panel(self, now):
         pn = self.pan
         if pn is None:
             return
         el = now - pn["t0"]
-        if pn["phase"] == "grow":  # his body stretches into a window, arms and legs tucking in
-            u = min(1.0, el / 0.9)
-            e = 4 * u ** 3 if u < 0.5 else 1 - (-2 * u + 2) ** 3 / 2  # ease in-out
-            pn["cur"] = lerp_rect(pn["from"], pn["to"], e)
-            pn["limb"] = max(0.0, 1 - u * 2.2)
-            pn["m"] = smooth((u - 0.4) / 0.6)  # ...and turns from Clawd into a window
-            if u >= 1:
-                pn.update(phase="hold", t0=now, m=1.0, limb=0.0)
-        elif pn["phase"] == "hold":  # wait for the real Claude window to show up
-            pn["cur"] = pn["to"]
-            h = self.watcher.hwnd if self.watcher else None
+        if pn["phase"] == "grow" and now >= pn.get("next_find", 0):
+            # look for the real window every 50ms, right from the first frame
+            pn["next_find"] = now + 0.05
+            h = find_claude_window()
             if h and not is_iconic(h):
                 rr = window_rect(h, visible=True)
                 if rr and rr[2] - rr[0] > 300 and rr[3] - rr[1] > 200:
-                    pn.update(phase="morph", t0=now, **{"from": pn["cur"], "to": rr})
+                    # already right on it? then no settling needed; otherwise a quick glide, longer if further
+                    dev = max(abs(a - b_) for a, b_ in zip(pn["cur"], rr))
+                    snap_t = 0.0 if (dev < 12 * self.scale and pn["m"] > 0.9) else 0.12 + min(0.2, dev / 2500)
+                    pn.update(phase="snap", t0=now, hwnd=h, m0=pn["m"], limb0=pn["limb"], painted=False,
+                              snap_t=snap_t, **{"from": pn["cur"]})
+                    self.watch_paint(pn)
                     self.request_perch()
-        elif pn["phase"] == "morph":  # line up exactly with the real window...
-            pn["cur"] = lerp_rect(pn["from"], pn["to"], smooth(el / 0.4))
-            if el >= 0.4:
+                    self.note_launch(now)
+                    el = 0.0
+        if pn["phase"] == "grow":  # his body stretches into the window, timed to land as the app appears
+            u = min(1.0, el / pn["E"])
+            e = 1 - (1 - u) ** 3  # quick start, gentle arrival
+            pn["cur"] = lerp_rect(pn["from"], pn["to"], e)
+            pn["limb"] = max(0.0, 1 - e * 2.2)
+            pn["m"] = smooth((e - 0.35) / 0.65)
+        elif pn["phase"] == "snap":  # the real window is up: settle exactly onto it (following it if it moves)
+            rr = window_rect(pn["hwnd"], visible=True) or pn["to"]
+            k = smooth(el / pn["snap_t"]) if pn["snap_t"] > 0 else 1.0
+            pn["cur"] = lerp_rect(pn["from"], rr, k)
+            pn["m"] = pn["m0"] + (1 - pn["m0"]) * k
+            pn["limb"] = pn["limb0"] * (1 - k)
+            if el >= pn["snap_t"]:
+                pn.update(phase="wait", t0=now, to=rr)
+        elif pn["phase"] == "wait":  # sitting exactly on it until the app has drawn itself
+            pn["cur"] = window_rect(pn["hwnd"], visible=True) or pn["to"]
+            if pn.get("painted") or el > 3.0:
                 pn.update(phase="fade", t0=now)
-        elif pn["phase"] == "fade":  # ...then melt away to reveal it
-            u = min(1.0, el / 0.45)
+        elif pn["phase"] == "fade":  # melt away to reveal it
+            if pn.get("hwnd"):
+                pn["cur"] = window_rect(pn["hwnd"], visible=True) or pn["cur"]
+            u = min(1.0, el / 0.3)
             self.panel.attributes("-alpha", max(0.0, 1 - smooth(u)))
             if u >= 1:
                 self.panel.withdraw()
@@ -1510,7 +1605,7 @@ class Pet:
                 box(a, b_, a + c, b_ + c, KEY)
         # his eyes slide together and become the loading dots
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-        hold = pn["phase"] in ("hold",) or (pn["phase"] == "grow" and m >= 1)
+        hold = m >= 0.95  # (the dots bounce once he's fully a window)
         for idx, col in ((0, 2), (2, 7)):
             ew, eh = min(cw, 6 * S), min(2 * ch, 12 * S)
             ex, ey = x0 + (col + 0.5) * cw - ew / 2, y0 + 3 * ch - eh / 2
@@ -1519,12 +1614,13 @@ class Pet:
             dy = cy + 3 * S - bob
             fx, fy = ex + (dx - ex) * m, ey + (dy - ey) * m
             fw, fh = ew + (S - ew) * m, eh + (S - eh) * m
-            if pn["phase"] in ("grow", "hold"):
+            if pn["phase"] != "fade":
                 box(fx, fy, fx + fw, fy + fh, mix(C["K"], C["O"], m))
-        if pn["phase"] in ("grow", "hold") and m > 0.9:
+        if pn["phase"] != "fade" and m > 0.9:
             bob = max(0.0, math.sin(self.t * 7 - 0.8)) * 1.5 * S if hold else 0
             box(cx - S / 2, cy + 3 * S - bob, cx + S / 2, cy + 4 * S - bob, C["O"])
-            if w > 44 * S and h > 26 * S:
+            late = pn["phase"] == "wait" or (pn["phase"] == "grow" and time.time() - pn["t0"] > pn["E"])
+            if late and w > 44 * S and h > 26 * S:  # only if the app is taking its time
                 cv.create_text(cx, cy - 3 * S, text="opening Claude", font=self.panel_font,
                                fill=mix(bg, C["O"], (m - 0.9) * 10))
 
