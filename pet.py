@@ -619,7 +619,7 @@ $TS = [System.Windows.Automation.TreeScope]
 $W = [System.Windows.Automation.TreeWalker]::RawViewWalker
 $editCond = New-Object System.Windows.Automation.PropertyCondition($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Edit)
 $btnCond = New-Object System.Windows.Automation.PropertyCondition($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)
-$cache = @{ hwnd = ''; items = @(); t = 0; ids = ''; gen = 0 }
+$cache = @{ hwnd = ''; items = @(); docs = @(); t = 0; ids = ''; gen = 0 }
 
 function Ok($e) {
   if ($e -eq $null) { return $false }
@@ -641,6 +641,53 @@ function Find-Box($edit) {
   return $edit
 }
 
+$docCond = New-Object System.Windows.Automation.PropertyCondition($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Document)
+
+function Overlays($docs) {
+  # rectangles of whatever the app shows on top of the chat (Settings / usage, menus, dialogs, toasts):
+  # those live next to the app's main frame, not inside it
+  $rects = @()
+  foreach ($doc in $docs) {
+    try {
+      $core = $W.GetFirstChild($doc)
+      if ($core -eq $null) { continue }
+      $todo = New-Object System.Collections.Queue
+      $ch = $W.GetNextSibling($W.GetFirstChild($core))  # skip the app frame itself
+      while ($ch -ne $null) { $todo.Enqueue(@($ch, 0)); $ch = $W.GetNextSibling($ch) }
+      while ($todo.Count -gt 0) {
+        $e, $d = $todo.Dequeue()
+        $r = $e.Current.BoundingRectangle
+        if (-not [double]::IsInfinity($r.X) -and $r.Width -ge 40 -and $r.Height -ge 40) { $rects += ,$r; continue }
+        if ($d -lt 4) {
+          $ch = $W.GetFirstChild($e)
+          while ($ch -ne $null) { $todo.Enqueue(@($ch, ($d + 1))); $ch = $W.GetNextSibling($ch) }
+        }
+      }
+    } catch { }
+  }
+  return ,$rects
+}
+
+function Clear-X($b, $want, $fw, $fh, $rects) {
+  # the spot on the box's top border nearest $want where no overlay covers Clawd (-1: nowhere)
+  if ($rects.Count -eq 0) { return [int]$want }
+  $lo = $b.X + $fw / 2; $hi = $b.X + $b.Width - $fw / 2
+  $step = [Math]::Max(8, $fw / 2)
+  for ($d = 0; $d -le $b.Width; $d += $step) {
+    foreach ($x in @(($want - $d), ($want + $d))) {
+      if ($x -lt $lo -or $x -gt $hi) { continue }
+      $hit = $false
+      foreach ($r in $rects) {
+        if ($x + $fw / 2 -gt $r.X -and $x - $fw / 2 -lt $r.X + $r.Width -and
+            $b.Y -gt $r.Y -and $b.Y - $fh -lt $r.Y + $r.Height) { $hit = $true; break }
+      }
+      if (-not $hit) { return [int]$x }
+      if ($d -eq 0) { break }
+    }
+  }
+  return -1
+}
+
 function Find-All($root) {
   $items = @()
   foreach ($e in $root.FindAll($TS::Descendants, $editCond)) {
@@ -655,19 +702,26 @@ while ($true) {
   $line = [Console]::In.ReadLine()
   if ($line -eq $null) { break }
   $out = 'none'
+  $args_ = $line.Split(' ')
+  $line = $args_[0]
+  $fw = 40; $fh = 30
+  if ($args_.Count -ge 3) { $fw = [int]$args_[1]; $fh = [int]$args_[2] }
   try {
     $now = [Environment]::TickCount
     $stale = ($cache.hwnd -ne $line) -or (($now - $cache.t) -gt 1500) -or ($cache.items.Count -eq 0)
     if (-not $stale) { foreach ($it in $cache.items) { if (-not (Ok $it[1])) { $stale = $true } } }
     if ($stale) {
       $cache.hwnd = $line
-      $cache.items = Find-All ($A::FromHandle([IntPtr][long]$line))
+      $root = $A::FromHandle([IntPtr][long]$line)
+      $cache.items = Find-All $root
+      $cache.docs = @($root.FindAll($TS::Descendants, $docCond))
       $cache.t = $now
       # count how often the set of boxes actually changes (new tab, switched tab, ...)
       $ids = ($cache.items | ForEach-Object { ($_[1].GetRuntimeId() -join '.') }) -join ','
       if ($ids -ne $cache.ids) { $cache.ids = $ids; $cache.gen++ }
     }
     $parts = @()
+    $over = Overlays $cache.docs
     foreach ($it in $cache.items) {
       $edit = $it[0]; $box = $it[1]
       if (-not (Ok $box)) { continue }
@@ -682,7 +736,10 @@ while ($true) {
       }
       $f = 0
       try { if ($edit.Current.HasKeyboardFocus -or ($edit.Current.ClassName -like '*ProseMirror-focused*')) { $f = 1 } } catch { }
-      $parts += ('{0} {1} {2} {3} {4} {5}' -f [int]$b.X, [int]$b.Y, [int]$b.Width, [int]$b.Height, $s, $f)
+      $sv = $s.Split(' ')
+      $want = if ([int]$sv[2] -gt 0) { [int]$sv[0] + [int]$sv[2] / 2 } else { $b.X + $b.Width - 20 }
+      $cx = Clear-X $b $want $fw $fh $over
+      $parts += ('{0} {1} {2} {3} {4} {5} {6}' -f [int]$b.X, [int]$b.Y, [int]$b.Width, [int]$b.Height, $s, $f, $cx)
     }
     if ($parts.Count -gt 0) { $out = [string]$cache.gen + '#' + ($parts -join ';') }
   } catch { $cache.hwnd = '' }
@@ -701,13 +758,14 @@ while ($true) {
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1,
             creationflags=0x08000000)  # CREATE_NO_WINDOW
 
-    def locate(self, hwnd):
-        """(generation, [{"box": (x, y, w, h), "btn": (x, y, w, h) or None, "focused": bool}, ...]) or None;
-        generation changes whenever the set of boxes is replaced"""
+    def locate(self, hwnd, foot=(40, 30)):
+        """(generation, [{"box": (x, y, w, h), "btn": (x, y, w, h) or None, "focused": bool,
+        "clear_x": screen x on the box top where no popup covers Clawd (None: nowhere)}, ...]) or None;
+        generation changes whenever the set of boxes is replaced. `foot` = Clawd's size in pixels."""
         try:
             if self.proc is None or self.proc.poll() is not None:
                 self._start()
-            self.proc.stdin.write(f"{int(hwnd)}\n")
+            self.proc.stdin.write(f"{int(hwnd)} {int(foot[0])} {int(foot[1])}\n")
             self.proc.stdin.flush()
             line = self.proc.stdout.readline().strip()
         except Exception as e:
@@ -721,8 +779,9 @@ while ($true) {
                 v = [int(x) for x in part.split()]
             except ValueError:
                 continue
-            if len(v) == 9 and v[2] > 0:
-                out.append({"box": tuple(v[:4]), "btn": tuple(v[4:8]) if v[6] > 0 else None, "focused": v[8] == 1})
+            if len(v) == 10 and v[2] > 0:
+                out.append({"box": tuple(v[:4]), "btn": tuple(v[4:8]) if v[6] > 0 else None, "focused": v[8] == 1,
+                            "clear_x": v[9] if v[9] >= 0 else None})
         return (gen, out) if out else None
 
 
@@ -749,6 +808,7 @@ class ClaudeWatcher(threading.Thread):
         self.gen = None
         self.saved_rect, self.last_save = None, 0.0
         self.busy = False  # set by the pet while he's flying / being dragged
+        self.foot = (40, 30)  # Clawd's size on the box in pixels, set by the pet
 
     @staticmethod
     def key(c):  # identity of a box that survives it growing upward while you type
@@ -817,7 +877,7 @@ class ClaudeWatcher(threading.Thread):
                         self.saved_rect = vr
                         save_state(rect=list(vr))  # so opening it can grow straight into that spot
                 if h and self.want and not is_iconic(h):
-                    found = self.locator.locate(h)
+                    found = self.locator.locate(h, self.foot)
                     r = window_rect(h)
                     if found and r:
                         gen, comps = found
@@ -841,7 +901,12 @@ class ClaudeWatcher(threading.Thread):
                                 x = c["btn"][0] + c["btn"][2] / 2
                             else:         # ...or where it normally sits, near the box's right end
                                 x = bx + bw - 20.3 * (ctypes.windll.user32.GetDpiForWindow(_VP(h)) or 96) / 96
-                            self.perch_rel = (r[2] - x, r[3] - by)  # feet on the box's top border
+                            if c["clear_x"] is None:  # something (Settings, a dialog...) covers the whole box
+                                self.perch_rel = None
+                            else:
+                                if abs(c["clear_x"] - x) > 2:  # partly covered: scoot along the box
+                                    x = c["clear_x"]
+                                self.perch_rel = (r[2] - x, r[3] - by)  # feet on the box's top border
                     else:  # mid tab-switch a box can vanish for a moment: hold on before giving up
                         self.misses += 1
                         if self.misses >= 5:
@@ -2752,6 +2817,7 @@ class Pet:
             self.tick_notes(now)
             if self.watcher:
                 self.watcher.busy = self.mode in ("drag", "fall", "leap", "summon")
+                self.watcher.foot = (14 * self.S_small, 10 * self.S_small)
                 self.watcher.want = (self.perched or self.mode in ("leap", "summon")
                                      or (self.home and now >= self.return_at - 1.0))
             self.tick_panel(now)
