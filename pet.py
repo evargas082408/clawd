@@ -269,6 +269,95 @@ def foreground_is(h):
     return bool(h) and ctypes.windll.user32.GetForegroundWindow() == h
 
 
+_VP = ctypes.c_void_p
+
+
+class _BIH(ctypes.Structure):
+    _fields_ = [("biSize", ctypes.c_uint32), ("biWidth", ctypes.c_int32), ("biHeight", ctypes.c_int32),
+                ("biPlanes", ctypes.c_uint16), ("biBitCount", ctypes.c_uint16), ("biCompression", ctypes.c_uint32),
+                ("biSizeImage", ctypes.c_uint32), ("biXPelsPerMeter", ctypes.c_int32),
+                ("biYPelsPerMeter", ctypes.c_int32), ("biClrUsed", ctypes.c_uint32), ("biClrImportant", ctypes.c_uint32)]
+
+
+def _setup_gdi():
+    u32, gdi = ctypes.windll.user32, ctypes.windll.gdi32
+    u32.GetDC.restype, u32.GetDC.argtypes = _VP, [_VP]
+    u32.ReleaseDC.argtypes = [_VP, _VP]
+    u32.PrintWindow.argtypes = [_VP, _VP, ctypes.c_uint]
+    gdi.CreateCompatibleDC.restype, gdi.CreateCompatibleDC.argtypes = _VP, [_VP]
+    gdi.CreateCompatibleBitmap.restype = _VP
+    gdi.CreateCompatibleBitmap.argtypes = [_VP, ctypes.c_int, ctypes.c_int]
+    gdi.SelectObject.restype, gdi.SelectObject.argtypes = _VP, [_VP, _VP]
+    gdi.DeleteObject.argtypes = [_VP]
+    gdi.DeleteDC.argtypes = [_VP]
+    gdi.GetDIBits.argtypes = [_VP, _VP, ctypes.c_uint, ctypes.c_uint, _VP, _VP, ctypes.c_uint]
+
+
+_setup_gdi()
+
+
+def capture_window(h):
+    """The window's own pixels as the app draws them (BGRA, top-down) - windows on top of it, like
+    Clawd himself, don't show up. Returns (buf, w, h, left, top) or None."""
+    r = window_rect(h)
+    if not r or r[2] <= r[0] or r[3] <= r[1]:
+        return None
+    W, H = r[2] - r[0], r[3] - r[1]
+    u32, gdi = ctypes.windll.user32, ctypes.windll.gdi32
+    sdc = u32.GetDC(None)
+    mdc = gdi.CreateCompatibleDC(sdc)
+    bmp = gdi.CreateCompatibleBitmap(sdc, W, H)
+    old = gdi.SelectObject(mdc, bmp)
+    try:
+        if not u32.PrintWindow(_VP(h), mdc, 2):  # PW_RENDERFULLCONTENT
+            return None
+        bi = _BIH()
+        bi.biSize, bi.biWidth, bi.biHeight, bi.biPlanes, bi.biBitCount = ctypes.sizeof(_BIH), W, -H, 1, 32
+        buf = (ctypes.c_ubyte * (W * H * 4))()
+        gdi.GetDIBits(mdc, bmp, 0, H, buf, ctypes.byref(bi), 0)
+        return bytes(buf), W, H, r[0], r[1]
+    finally:
+        gdi.SelectObject(mdc, old)
+        gdi.DeleteObject(bmp)
+        gdi.DeleteDC(mdc)
+        u32.ReleaseDC(None, sdc)
+
+
+def orange_critter(buf, W, H, x0, y0, x1, y1, scale):
+    """Is there a solid, critter-sized blob of Claude orange in this part of the image?
+    (that's the app's own little Clawd, which shows on a brand-new chat)"""
+    x0, y0, x1, y1 = max(0, int(x0)), max(0, int(y0)), min(W, int(x1)), min(H, int(y1))
+    n, bx0, by0, bx1, by1 = 0, 1 << 30, 1 << 30, -1, -1
+    step = 2
+    for y in range(y0, y1, step):
+        row = y * W * 4
+        for x in range(x0, x1, step):
+            i = row + x * 4
+            b, g, r = buf[i], buf[i + 1], buf[i + 2]
+            if 170 <= r <= 245 and 85 <= g <= 150 and 50 <= b <= 120 and r - g >= 55 and g >= b - 5:
+                n += 1
+                bx0, by0, bx1, by1 = min(bx0, x), min(by0, y), max(bx1, x), max(by1, y)
+    if not n:
+        return False
+    px = n * step * step
+    bw, bh = bx1 - bx0 + step, by1 - by0 + step
+    k = scale / 1.5
+    return px >= 100 * k * k and bw >= 8 * scale and bh >= 6 * scale and px / (bw * bh) >= 0.3
+
+
+def mix(c1, c2, t):
+    """blend two #rrggbb colours"""
+    t = max(0.0, min(1.0, t))
+    a, b = int(c1[1:], 16), int(c2[1:], 16)
+    return "#%02x%02x%02x" % tuple(int(((a >> s_) & 255) + (((b >> s_) & 255) - ((a >> s_) & 255)) * t)
+                                   for s_ in (16, 8, 0))
+
+
+def smooth(u):
+    u = max(0.0, min(1.0, u))
+    return u * u * (3 - 2 * u)
+
+
 def no_activate(win):
     """never steal focus, never show in alt-tab"""
     try:
@@ -332,10 +421,10 @@ def serve(sock, q):
 
 
 class ComposerLocator:
-    """Asks Windows UI Automation where the Claude app's message box is, through one long-lived
-    PowerShell helper. The helper keeps hold of the elements it found, so repeat checks (5x a second)
-    cost about a millisecond; it only searches again when the box is replaced (new tab, switching tabs).
-    Answers 'bx by bw bh sx sy sw sh': the bordered box, and its Send/Stop button (-1s if none)."""
+    """Asks Windows UI Automation where the Claude app's message boxes are (one per open tab/pane),
+    through one long-lived PowerShell helper. It keeps hold of what it found, so checking 5x a second
+    is cheap, and looks again when a box is replaced or every 1.5s (to notice newly opened tabs).
+    Answers one 'bx by bw bh sx sy sw sh focused' per box, joined by ';' (s* = Send/Stop button, -1 if none)."""
     SCRIPT = r'''
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 Add-Type 'using System.Runtime.InteropServices; public class ClawdDpi { [DllImport("user32.dll")] public static extern bool SetProcessDPIAware(); }'
@@ -345,23 +434,15 @@ $TS = [System.Windows.Automation.TreeScope]
 $W = [System.Windows.Automation.TreeWalker]::RawViewWalker
 $editCond = New-Object System.Windows.Automation.PropertyCondition($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Edit)
 $btnCond = New-Object System.Windows.Automation.PropertyCondition($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)
-$cache = @{ hwnd = ''; box = $null }
+$cache = @{ hwnd = ''; items = @(); t = 0 }
 
 function Ok($e) {
   if ($e -eq $null) { return $false }
   try { $r = $e.Current.BoundingRectangle; return (-not $e.Current.IsOffscreen) -and $r.Width -gt 0 -and $r.Height -gt 0 } catch { return $false }
 }
 
-function Find-Box($root) {
-  # the message field: the bottom-most visible prompt editor
-  $edit = $null
-  foreach ($e in $root.FindAll($TS::Descendants, $editCond)) {
-    if (($e.Current.Name -eq 'Prompt' -or $e.Current.ClassName -like '*ProseMirror*') -and (Ok $e)) {
-      if ($edit -eq $null -or $e.Current.BoundingRectangle.Y -gt $edit.Current.BoundingRectangle.Y) { $edit = $e }
-    }
-  }
-  if ($edit -eq $null) { return $null }
-  # the bordered box around it: the surface element, else the first padded ancestor
+function Find-Box($edit) {
+  # the bordered box around a message field: the surface element, else the first padded ancestor
   $et = $edit.Current.BoundingRectangle.Y
   $padded = $null
   $cur = $edit
@@ -375,27 +456,47 @@ function Find-Box($root) {
   return $edit
 }
 
+function Find-All($root) {
+  $items = @()
+  foreach ($e in $root.FindAll($TS::Descendants, $editCond)) {
+    if (($e.Current.Name -eq 'Prompt' -or $e.Current.ClassName -like '*ProseMirror*') -and (Ok $e)) {
+      $items += ,@($e, (Find-Box $e))
+    }
+  }
+  return ,$items
+}
+
 while ($true) {
   $line = [Console]::In.ReadLine()
   if ($line -eq $null) { break }
   $out = 'none'
   try {
-    if ($cache.hwnd -ne $line -or -not (Ok $cache.box)) {
+    $now = [Environment]::TickCount
+    $stale = ($cache.hwnd -ne $line) -or (($now - $cache.t) -gt 1500) -or ($cache.items.Count -eq 0)
+    if (-not $stale) { foreach ($it in $cache.items) { if (-not (Ok $it[1])) { $stale = $true } } }
+    if ($stale) {
       $cache.hwnd = $line
-      $cache.box = Find-Box ($A::FromHandle([IntPtr][long]$line))
+      $cache.items = Find-All ($A::FromHandle([IntPtr][long]$line))
+      $cache.t = $now
     }
-    if ($cache.box -ne $null) {
-      $b = $cache.box.Current.BoundingRectangle
+    $parts = @()
+    foreach ($it in $cache.items) {
+      $edit = $it[0]; $box = $it[1]
+      if (-not (Ok $box)) { continue }
+      $b = $box.Current.BoundingRectangle
       $s = '-1 -1 -1 -1'
-      foreach ($e in $cache.box.FindAll($TS::Descendants, $btnCond)) {
+      foreach ($e in $box.FindAll($TS::Descendants, $btnCond)) {
         $n = $e.Current.Name
         if (($n -like 'Send*' -or $n -like 'Stop*') -and (Ok $e)) {
           $r = $e.Current.BoundingRectangle
           $s = '{0} {1} {2} {3}' -f [int]$r.X, [int]$r.Y, [int]$r.Width, [int]$r.Height
         }
       }
-      $out = '{0} {1} {2} {3} {4}' -f [int]$b.X, [int]$b.Y, [int]$b.Width, [int]$b.Height, $s
+      $f = 0
+      try { if ($edit.Current.HasKeyboardFocus -or ($edit.Current.ClassName -like '*ProseMirror-focused*')) { $f = 1 } } catch { }
+      $parts += ('{0} {1} {2} {3} {4} {5}' -f [int]$b.X, [int]$b.Y, [int]$b.Width, [int]$b.Height, $s, $f)
     }
+    if ($parts.Count -gt 0) { $out = $parts -join ';' }
   } catch { $cache.hwnd = '' }
   [Console]::Out.WriteLine($out)
   [Console]::Out.Flush()
@@ -413,7 +514,7 @@ while ($true) {
             creationflags=0x08000000)  # CREATE_NO_WINDOW
 
     def locate(self, hwnd):
-        """((bx, by, bw, bh), (sx, sy, sw, sh) or None) in screen pixels, or None if there's no box"""
+        """list of {"box": (x, y, w, h), "btn": (x, y, w, h) or None, "focused": bool}, or None"""
         try:
             if self.proc is None or self.proc.poll() is not None:
                 self._start()
@@ -424,32 +525,89 @@ while ($true) {
             log("locator failed", repr(e))
             self.proc = None
             return None
-        try:
-            v = [int(x) for x in line.split()]
-        except ValueError:
-            return None
-        if len(v) != 8 or v[2] <= 0:
-            return None
-        return tuple(v[:4]), (tuple(v[4:]) if v[6] > 0 else None)
+        out = []
+        for part in line.split(";"):
+            try:
+                v = [int(x) for x in part.split()]
+            except ValueError:
+                continue
+            if len(v) == 9 and v[2] > 0:
+                out.append({"box": tuple(v[:4]), "btn": tuple(v[4:8]) if v[6] > 0 else None, "focused": v[8] == 1})
+        return out or None
 
 
 class ClaudeWatcher(threading.Thread):
-    """Keeps an eye on the Claude app window (opened / closed / which one you're using) and, while
-    Clawd wants to perch, on where its message box is - 5 times a second, so he can follow the box
-    as it grows while you type, and as you open or flip between tabs."""
+    """Keeps an eye on the Claude app: whether its window is open, its message boxes (one per tab),
+    which one you're typing in, and which ones are brand-new chats (the app's own little Clawd is
+    sitting there). Publishes where Clawd should perch as `perch_rel`, and bumps `target_id` when
+    that's a different box than before."""
 
     def __init__(self, q):
         super().__init__(daemon=True)
         self.q = q
         self.hwnd = find_claude_window()
         self.perch_rel = None  # perch point as (from the window's right edge, from its bottom edge)
-        self.want = False      # set by the pet while perching / about to perch
-        self.force = False     # kept for callers; every check is a fresh look now
+        self.target_id = 0
+        self.want = False      # set by the pet while it lives on (or is heading to) a message box
+        self.force = False     # look for new chats right away
         self.locator = ComposerLocator()
         self.misses = 0
+        self.newchat = {}
+        self.last_check = 0.0
+        self.target_key = None
+        self.pending_key, self.pending_since = None, 0.0
+
+    @staticmethod
+    def key(c):  # identity of a box that survives it growing upward while you type
+        bx, by, bw, bh = c["box"]
+        return round(bx / 40), round((by + bh) / 40)
+
+    def set_target(self, k):
+        self.target_key = k
+        self.target_id += 1
+        self.pending_key = None
+
+    def check_new_chats(self, h, comps, keys):
+        self.last_check = time.time()
+        cap = capture_window(h)
+        if not cap:
+            return
+        buf, W, H, wl, wt = cap
+        sc = (ctypes.windll.user32.GetDpiForWindow(_VP(h)) or 96) / 96
+        found = {}
+        for c, k in zip(comps, keys):
+            bx, by, bw, bh = c["box"]
+            cx = c["btn"][0] + c["btn"][2] / 2 if c["btn"] else bx + bw - 20.3 * sc
+            found[k] = orange_critter(buf, W, H, cx - 100 * sc - wl, by - 120 * sc - wt,
+                                      cx + 60 * sc - wl, by + 2 * sc - wt, sc)
+        self.newchat = found
+
+    def pick(self, comps, keys, now):
+        ok = [k for k in keys if not self.newchat.get(k, False)]
+        focused = [k for c, k in zip(comps, keys) if c["focused"]]
+        if focused and focused[0] in ok:
+            want = focused[0]           # the box you're typing in...
+        elif self.target_key in ok:
+            want = self.target_key      # ...else stay put...
+        elif ok:
+            want = ok[-1]               # ...else any box that isn't a new chat
+        else:
+            want = None                 # only new chats (or nothing): nowhere to sit
+        if want != self.target_key:
+            if want is None or self.target_key is None or self.target_key not in ok:
+                # nothing to hold on to (or his box just became a new chat): move now
+                self.set_target(want)
+            elif want != self.pending_key:  # moving to another box: make sure you meant it
+                self.pending_key, self.pending_since = want, now
+            elif now - self.pending_since >= 0.4:
+                self.set_target(want)
+        else:
+            self.pending_key = None
+        return keys.index(self.target_key) if self.target_key in keys else None
 
     def run(self):
         while True:
+            front = False
             try:
                 h = find_claude_window()
                 if h and not self.hwnd:
@@ -458,25 +616,36 @@ class ClaudeWatcher(threading.Thread):
                     self.perch_rel = None
                     self.q.put(("claude_closed", ""))
                 self.hwnd = h
+                front = claude_in_front()
                 if h and self.want and not is_iconic(h):
-                    found = self.locator.locate(h)
+                    comps = self.locator.locate(h)
                     r = window_rect(h)
-                    if found and r:
-                        (bx, by, bw, bh), btn = found
-                        if btn:  # stand right above the Send / Stop button...
-                            x = btn[0] + btn[2] / 2
-                        else:    # ...or where it normally sits, near the box's right end
-                            dpi = ctypes.windll.user32.GetDpiForWindow(ctypes.c_void_p(h)) or 96
-                            x = bx + bw - 20.3 * dpi / 96
-                        self.perch_rel = (r[2] - x, r[3] - by)  # feet on the box's top border
+                    if comps and r:
                         self.misses = 0
-                    else:  # mid tab-switch the box can vanish for a moment: hold on before giving up
+                        now = time.time()
+                        keys = [self.key(c) for c in comps]
+                        if (front or self.force) and (self.force or now - self.last_check > 0.6
+                                                      or any(k not in self.newchat for k in keys)):
+                            self.force = False
+                            self.check_new_chats(h, comps, keys)
+                        i = self.pick(comps, keys, now)
+                        if i is None:
+                            self.perch_rel = None
+                        else:
+                            c = comps[i]
+                            bx, by, bw, bh = c["box"]
+                            if c["btn"]:  # stand right above the Send / Stop button...
+                                x = c["btn"][0] + c["btn"][2] / 2
+                            else:         # ...or where it normally sits, near the box's right end
+                                x = bx + bw - 20.3 * (ctypes.windll.user32.GetDpiForWindow(_VP(h)) or 96) / 96
+                            self.perch_rel = (r[2] - x, r[3] - by)  # feet on the box's top border
+                    else:  # mid tab-switch a box can vanish for a moment: hold on before giving up
                         self.misses += 1
                         if self.misses >= 5:
                             self.perch_rel = None
             except Exception as e:
                 log("watcher error", repr(e))
-            time.sleep(0.2 if self.want else 0.5)
+            time.sleep(0.2 if (self.want and front) else 0.6)
 
 
 def ease_out_back(u, k=1.4):
@@ -577,8 +746,16 @@ class Pet:
         self.sm = None              # "summon Claude" sequence
         self.pan = None             # the window that grows out of him
         self.panel = self.panel_cv = None
+        self.pan_last = None
+        self.home = False           # Claude is open: Clawd lives on its message box when he can
+        self.lost_since = None      # perched, but the box went away / became a new chat
+        self.ready_since = None     # on the screen edges, and a box is free to sit on
+        self.seen_target = 0
+        self.no_rise_until = 0.0
+        self.no_side_until = 0.0
         self.last = now
         self.t = 0.0
+        self.make_panel()  # made up front so opening Claude doesn't hitch
         self.tick()
 
     # ---------- geometry helpers
@@ -798,6 +975,7 @@ class Pet:
         self.slide = 0.0
         self.perched = False
         self.perch_wanted_until = 0
+        self.home = False          # you picked him up: he stays where you put him
         self.set_size(self.S_big)  # grows back in your hand
         self.mode = "drag"
         self.drag_hist.clear()
@@ -823,6 +1001,12 @@ class Pet:
         # gravity pulls toward the nearest edge; in the middle of the screen he just falls down
         l, t, r, b = work_area()
         nx, ny = (self.fx - l) / (r - l), (self.fy - t) / (b - t)
+        pt = self.perch_point() if self.watcher else None
+        if pt and math.hypot(vx, vy) < 1800 * self.S / 5 and \
+                math.hypot(self.fx - pt[0], self.fy - (pt[1] - 5 * self.S)) < 150 * self.scale:
+            self.home = True  # dropped onto a message box: sit on it
+            if self.start_leap():
+                return
         if 0.25 < nx < 0.75 and 0.25 < ny < 0.75:
             # dropped (not flung) in the middle while the Claude app isn't open: open it
             if self.watcher and not self.watcher.hwnd and math.hypot(vx, vy) < 1800 * self.S / 5:
@@ -995,10 +1179,32 @@ class Pet:
         k = 1 - math.exp(-dt * 14)
         self.rel_s = (self.rel_s[0] + (tgt[0] - self.rel_s[0]) * k, self.rel_s[1] + (tgt[1] - self.rel_s[1]) * k)
 
-    def request_perch(self, secs=25):
-        self.perch_wanted_until = time.time() + secs
+    def request_perch(self, secs=None):
+        self.home = True
         if self.watcher:
             self.watcher.want = True
+            self.watcher.force = True
+
+    def go_sides(self):
+        """the box went away (or it's a new chat with the app's own Clawd): wait on the side of the screen"""
+        now = time.time()
+        pt = self.perch_pt
+        l, t, r, b = work_area()
+        cx = pt[0] if pt else (l + r) / 2
+        cy = pt[1] if pt else t + (b - t) * 0.6
+        self.perched = False
+        self.lost_since = self.ready_since = None
+        self.rel_s = None
+        self.set_size(self.S_big, now_=True)
+        self.edge = "left" if cx - l < r - cx else "right"
+        L, m = self.edge_len(), self.CW * 0.55
+        self.pos = self.target = max(m, min(L - m, cy - t - 60 * self.scale))
+        self.p, self.pgoal = float(self.HIDE), float(self.EYES)  # pops back into view, peeking
+        self.jump = self.jv = 0.0
+        self.action, self.action_until = "peek", now + 2.5
+        self.next_action = now + random.uniform(4, 6)
+        self.pending_edge = None
+        self._geom = None
 
     def unperch(self, fall=True):
         S = self.S
@@ -1038,6 +1244,8 @@ class Pet:
             x0, y0 = self.fx, self.fy
         self.perch_pt = pt
         self.rel_s = self.watcher.perch_rel
+        self.seen_target = self.watcher.target_id
+        self.lost_since = self.ready_since = None
         tx, ty = pt[0], pt[1] - 5 * S
         dist = math.hypot(tx - x0, ty - y0)
         self.leap = {"x0": x0, "y0": y0, "t0": time.time(), "T": max(0.6, min(1.3, 0.55 + dist / 2600)),
@@ -1118,87 +1326,92 @@ class Pet:
             self.action_until = now + random.uniform(6, 10)
         self.next_action = self.action_until + random.uniform(1.5, 3.5)
 
-    # ---------- summoning the Claude app: a window grows out of Clawd
+    # ---------- summoning the Claude app: Clawd inflates into its window
     def start_summon(self):
         self.set_size(self.S_big, now_=True)
         self.mode = "summon"
-        self.sm = {"phase": "charge", "t0": time.time()}
+        self.sm = {"phase": "windup", "t0": time.time()}
         self.particles = []
         self.set_hit(None)
-        self.say("opening Claude!", 1.6)
+        self.say("opening Claude!", 1.0)
 
     def tick_summon(self, now, dt):
-        S = self.S
-        sm = self.sm
-        l, t, r, b = work_area()
-        if sm["phase"] == "charge":  # coast to a stop and wind up
-            k = math.exp(-dt * 8)
+        S, F, sm = self.S, self.FW, self.sm
+        if sm["phase"] == "windup":  # coast to a stop with a little squash...
+            k = math.exp(-dt * 10)
             self.vx *= k
             self.vy *= k
             self.fx += self.vx * dt
             self.fy += self.vy * dt
-            if now - sm["t0"] > 0.35:
+            el = now - sm["t0"]
+            self.place(F, F, int(self.fx - F / 2), int(self.fy - F / 2))
+            self.canvas.delete("all")
+            self.free = ("bottom", F / 2, F / 2 + math.sin(min(1.0, el / 0.3) * math.pi) * S * 0.6)
+            self.draw_body(0, 0, "happy", 0, "wave", -1, blush=True)
+            self.free = None
+            if self.bubble and now < self.bubble[1]:
+                self.bubble_at(self.bubble[0], F / 2, F / 2 - 6 * S, "up", F, F)
+            if el > 0.3:  # ...then inflate into the window (drawn on the big overlay from here on)
                 open_claude()
-                self.start_panel((self.fx - 7 * S, self.fy - 5 * S, self.fx + 7 * S, self.fy + 5 * S))
-                sm.update(phase="ride", t_open=now)
-        elif sm["phase"] == "ride":  # stand on top of the growing window
-            if self.pan:
-                x0, y0, x1, y1 = self.pan["cur"]
-                tx, ty = (x0 + x1) / 2, max(t + 6 * S, y0 - 5 * S)
-                k = 1 - math.exp(-dt * 16)
-                self.fx += (tx - self.fx) * k
-                self.fy += (ty - self.fy) * k
-                if self.pan["phase"] == "hold" and now - sm["t_open"] > 16:  # it never showed up
-                    self.pan_fade()
-                    self.say("hmm, Claude\ndidn't open", 2.2)
-                    sm.update(phase="wait", t_wait=now - 9)
-            if sm["phase"] == "ride" and (self.pan is None or self.pan["phase"] in ("morph", "fade")):
-                sm.update(phase="wait", t_wait=now)
-        elif sm["phase"] == "wait":  # Claude is open: hop onto its input box as soon as it's there
-            if self.perch_point() and self.start_leap():
-                return
-            if now - sm["t_wait"] > 12:
-                self.vx = self.vy = 0.0
+                self.canvas.delete("all")
+                self.start_panel((self.fx - 5 * S, self.fy - 5 * S, self.fx + 5 * S, self.fy + 3 * S))
+                sm.update(phase="inside", t_open=now)
+            return
+        self.canvas.delete("all")
+        pn = self.pan
+        if pn and pn["phase"] == "hold" and now - sm["t_open"] > 16:  # the app never showed up
+            sm["failed"] = True
+            self.pan_fade()
+        if pn is None:
+            if sm.get("failed") and self.pan_last:  # shrink-free fallback: drop back out
+                x0, y0, x1, y1 = self.pan_last
+                self.fx, self.fy = (x0 + x1) / 2, (y0 + y1) / 2
+                self.vx, self.vy = 0.0, -3.0 * S
                 self.grav = "bottom"
                 self.mode = "fall"
                 return
-        F = self.FW
-        self.place(F, F, int(self.fx - F / 2), int(self.fy - F / 2))
-        self.canvas.delete("all")
-        bob = math.sin(self.t * 4) * S * 0.3
-        self.free = ("bottom", F / 2, F / 2 + bob)
-        self.draw_body(0, 0, "happy", 0, "wave", -1, blush=True)
-        self.free = None
-        if random.random() < 0.08:
-            self.particles.append({"x": F / 2 + random.uniform(-6, 6) * S, "y": F / 2 + random.uniform(-4, 2) * S,
-                                   "vx": random.uniform(-1, 1) * S * 2, "vy": -random.uniform(4, 7) * S,
-                                   "life": 0.8, "kind": "spark", "abs": True})
-        if self.bubble and now < self.bubble[1]:
-            self.bubble_at(self.bubble[0], F / 2, F / 2 - 6 * S, "up", F, F)
-        self.draw_particles(dt)
+            # he's inside the app now: he'll pop up out of its message box once it's ready
+            self.mode = "idle"
+            self.perched = True
+            self.home = True
+            self.set_size(self.S_small, now_=True)
+            self.edge = "bottom"
+            self.p, self.pgoal = float(self.HIDE), float(self.EYES)
+            self.jump = self.jv = 0.0
+            self.vis = self.vis_raw = False
+            self.lost_since = self.ready_since = None
+            self.no_side_until = now + 6  # the app can take a few seconds to show its message box
+            self.rel_s = None
+            self.perch_pt = self.perch_point()
+            self.seen_target = self.watcher.target_id if self.watcher else 0
+            self.action, self.next_action = None, now + 3
+            self._geom = None
 
-    def start_panel(self, rect):
+    def make_panel(self):
+        win = tk.Toplevel(self.root)
+        win.withdraw()
+        win.overrideredirect(True)
+        win.title("clawd-pet")
+        win.attributes("-topmost", True)
+        win.attributes("-transparentcolor", KEY)
+        win.config(bg=KEY)
+        no_activate(win)
+        cv = tk.Canvas(win, bg=KEY, highlightthickness=0, bd=0)
+        cv.pack(fill="both", expand=True)
+        self.panel, self.panel_cv = win, cv
+
+    def start_panel(self, body):
         l, t, r, b = work_area()
-        if self.panel is None:
-            win = tk.Toplevel(self.root)
-            win.overrideredirect(True)
-            win.title("clawd-pet")
-            win.attributes("-topmost", True)
-            win.attributes("-transparentcolor", KEY)
-            win.config(bg=KEY)
-            no_activate(win)
-            cv = tk.Canvas(win, bg=KEY, highlightthickness=0, bd=0)
-            cv.pack(fill="both", expand=True)
-            self.panel, self.panel_cv = win, cv
         W, H = r - l, b - t
         self.panel.geometry(f"{W}x{H}+{l}+{t}")  # one full-screen, mostly see-through window: never resized
         self.panel.attributes("-alpha", 1.0)
         self.panel.deiconify()
-        self.root.lift()   # Clawd stays in front of the window he's pulling out
+        self.root.lift()
         self.hit.lift()
         tw, th = int(W * 0.7), int(H * 0.76)
         to = (l + (W - tw) // 2, t + (H - th) // 2, l + (W + tw) // 2, t + (H + th) // 2)
-        self.pan = {"phase": "grow", "t0": time.time(), "from": rect, "to": to, "cur": rect, "origin": (l, t)}
+        self.pan = {"phase": "grow", "t0": time.time(), "from": body, "to": to, "cur": body,
+                    "origin": (l, t), "m": 0.0, "limb": 1.0}
 
     def pan_fade(self):
         if self.pan and self.pan["phase"] != "fade":
@@ -1209,11 +1422,14 @@ class Pet:
         if pn is None:
             return
         el = now - pn["t0"]
-        if pn["phase"] == "grow":
-            u = min(1.0, el / 0.6)
-            pn["cur"] = lerp_rect(pn["from"], pn["to"], ease_out_back(u))
+        if pn["phase"] == "grow":  # his body stretches into a window, arms and legs tucking in
+            u = min(1.0, el / 0.9)
+            e = 4 * u ** 3 if u < 0.5 else 1 - (-2 * u + 2) ** 3 / 2  # ease in-out
+            pn["cur"] = lerp_rect(pn["from"], pn["to"], e)
+            pn["limb"] = max(0.0, 1 - u * 2.2)
+            pn["m"] = smooth((u - 0.4) / 0.6)  # ...and turns from Clawd into a window
             if u >= 1:
-                pn.update(phase="hold", t0=now)
+                pn.update(phase="hold", t0=now, m=1.0, limb=0.0)
         elif pn["phase"] == "hold":  # wait for the real Claude window to show up
             pn["cur"] = pn["to"]
             h = self.watcher.hwnd if self.watcher else None
@@ -1221,47 +1437,82 @@ class Pet:
                 rr = window_rect(h, visible=True)
                 if rr and rr[2] - rr[0] > 300 and rr[3] - rr[1] > 200:
                     pn.update(phase="morph", t0=now, **{"from": pn["cur"], "to": rr})
-                    self.request_perch(30)
+                    self.request_perch()
         elif pn["phase"] == "morph":  # line up exactly with the real window...
-            u = min(1.0, el / 0.3)
-            pn["cur"] = lerp_rect(pn["from"], pn["to"], u * u * (3 - 2 * u))
-            if u >= 1:
+            pn["cur"] = lerp_rect(pn["from"], pn["to"], smooth(el / 0.4))
+            if el >= 0.4:
                 pn.update(phase="fade", t0=now)
-        elif pn["phase"] == "fade":  # ...then fade away to reveal it
-            u = min(1.0, el / 0.35)
-            self.panel.attributes("-alpha", max(0.0, 1 - u))
+        elif pn["phase"] == "fade":  # ...then melt away to reveal it
+            u = min(1.0, el / 0.45)
+            self.panel.attributes("-alpha", max(0.0, 1 - smooth(u)))
             if u >= 1:
                 self.panel.withdraw()
+                self.pan_last = pn["cur"]
                 self.pan = None
                 return
-        self.draw_panel(pn["cur"])
+        self.pan_last = pn["cur"]
+        self.draw_panel(pn)
 
-    def draw_panel(self, rect):
+    def draw_panel(self, pn):
         S, cv = self.S, self.panel_cv
-        ox, oy = self.pan["origin"]
-        x0, y0, x1, y1 = rect[0] - ox, rect[1] - oy, rect[2] - ox, rect[3] - oy
+        ox, oy = pn["origin"]
+        x0, y0, x1, y1 = (pn["cur"][0] - ox, pn["cur"][1] - oy, pn["cur"][2] - ox, pn["cur"][3] - oy)
+        m, limb = pn["m"], pn["limb"]
         cv.delete("all")
         w, h = x1 - x0, y1 - y0
         if w < 4 or h < 4:
             return
-        c = min(S, w / 4, h / 4)  # chunky pixel corners
-        bw = max(2, S // 2)
+        cw, ch = w / 10, h / 8  # his 10x8 body grid, stretched to the current size
+        bg = "#262624"
 
-        def chunky(a0, b0, a1, b1, col, cc):
-            cv.create_rectangle(a0 + cc, b0, a1 - cc, b1, fill=col, width=0)
-            cv.create_rectangle(a0, b0 + cc, a1, b1 - cc, fill=col, width=0)
+        def box(a0, b0, a1, b1, col):
+            cv.create_rectangle(a0, b0, a1, b1, fill=col, width=0)
 
-        chunky(x0, y0, x1, y1, C["O"], c)
-        chunky(x0 + bw, y0 + bw, x1 - bw, y1 - bw, "#262624", max(0, c - bw))
-        if h > 14 * S:  # title bar strip
-            cv.create_rectangle(x0 + bw + c, y0 + bw, x1 - bw - c, y0 + 5 * S, fill="#30302E", width=0)
-        if w > 44 * S and h > 26 * S and self.pan["phase"] in ("grow", "hold"):
-            cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-            cv.create_text(cx, cy - 3 * S, text="opening Claude", font=self.panel_font, fill=C["O"])
-            for i in range(3):  # bouncing pixel dots
-                dy = max(0.0, math.sin(self.t * 7 - i * 0.8)) * 1.5 * S
-                dx = cx + (i - 1) * 3 * S
-                cv.create_rectangle(dx - S / 2, cy + 3 * S - dy, dx + S / 2, cy + 4 * S - dy, fill=C["O"], width=0)
+        if limb > 0.01:  # arms and legs, tucking in
+            for c in (1, 3, 6, 8):
+                box(x0 + c * cw, y1, x0 + (c + 1) * cw, y1 + 2 * ch * limb, C["D"])
+            box(x0 - 2 * cw * limb, y0 + 4 * ch, x0, y0 + 5 * ch, C["O"])
+            box(x0 - 2 * cw * limb, y0 + 5 * ch, x0, y0 + 6 * ch, C["D"])
+            box(x1, y0 + 4 * ch, x1 + 2 * cw * limb, y0 + 5 * ch, C["O"])
+            box(x1, y0 + 5 * ch, x1 + 2 * cw * limb, y0 + 6 * ch, C["D"])
+        for j, row in enumerate(BODY):  # the body, fading from Claude orange to window dark
+            i = 0
+            while i < len(row):
+                k = i
+                while k < len(row) and row[k] == row[i]:
+                    k += 1
+                box(x0 + i * cw, y0 + j * ch, x0 + k * cw, y0 + (j + 1) * ch, mix(C[row[i]], bg, m))
+                i = k
+        if m > 0:
+            bw = max(2, S // 2) * m  # an orange window border grows in
+            box(x0, y0, x1, y0 + bw, C["O"])
+            box(x0, y1 - bw, x1, y1, C["O"])
+            box(x0, y0, x0 + bw, y1, C["O"])
+            box(x1 - bw, y0, x1, y1, C["O"])
+            if h > 14 * S and m > 0.5:  # title bar strip
+                box(x0 + bw + S, y0 + bw, x1 - bw - S, y0 + 5 * S, mix(bg, "#30302E", (m - 0.5) * 2))
+            c = S * m  # chunky pixel corners
+            for (a, b_) in ((x0, y0), (x1 - c, y0), (x0, y1 - c), (x1 - c, y1 - c)):
+                box(a, b_, a + c, b_ + c, KEY)
+        # his eyes slide together and become the loading dots
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        hold = pn["phase"] in ("hold",) or (pn["phase"] == "grow" and m >= 1)
+        for idx, col in ((0, 2), (2, 7)):
+            ew, eh = min(cw, 6 * S), min(2 * ch, 12 * S)
+            ex, ey = x0 + (col + 0.5) * cw - ew / 2, y0 + 3 * ch - eh / 2
+            dx = cx + (idx - 1) * 3 * S - S / 2
+            bob = max(0.0, math.sin(self.t * 7 - idx * 0.8)) * 1.5 * S if hold else 0
+            dy = cy + 3 * S - bob
+            fx, fy = ex + (dx - ex) * m, ey + (dy - ey) * m
+            fw, fh = ew + (S - ew) * m, eh + (S - eh) * m
+            if pn["phase"] in ("grow", "hold"):
+                box(fx, fy, fx + fw, fy + fh, mix(C["K"], C["O"], m))
+        if pn["phase"] in ("grow", "hold") and m > 0.9:
+            bob = max(0.0, math.sin(self.t * 7 - 0.8)) * 1.5 * S if hold else 0
+            box(cx - S / 2, cy + 3 * S - bob, cx + S / 2, cy + 4 * S - bob, C["O"])
+            if w > 44 * S and h > 26 * S:
+                cv.create_text(cx, cy - 3 * S, text="opening Claude", font=self.panel_font,
+                               fill=mix(bg, C["O"], (m - 0.9) * 10))
 
     def on_menu(self, e):
         try:
@@ -1338,17 +1589,20 @@ class Pet:
                 if self.mode == "idle":
                     self.on_click(None)
             elif cmd in ("claude_opened", "session", "perch"):
-                # Claude app opened / new project / menu: hop onto the app's input box
-                if self.perched and cmd == "session" and self.mode == "idle":
-                    self.jv = 7.0 * self.S
-                    for _ in range(4):
-                        self.spawn("spark")
-                elif cmd == "claude_opened" or (self.watcher and self.watcher.hwnd):
-                    if self.mode == "away":
-                        self.come_back()
+                # Claude app opened / new project / menu: live on the app's message box
+                if self.mode == "away":
+                    self.come_back()
+                if cmd == "session":
+                    # a new chat shows the app's own little Clawd: step aside until it's gone
+                    self.no_rise_until = time.time() + 1.5
+                    if self.perched and self.mode == "idle":
+                        self.pgoal = self.HIDE
+                        self.sink_fast_until = time.time() + 0.3
+                if cmd == "claude_opened" or (self.watcher and self.watcher.hwnd):
                     self.request_perch()
             elif cmd == "claude_closed":
                 self.perch_wanted_until = 0
+                self.home = False
                 if self.perched and self.mode == "idle":
                     self.unperch(fall=True)
                 elif self.perched:
@@ -1554,18 +1808,19 @@ class Pet:
     def tick_idle(self, now, dt):
         S = self.S
         perch_visible = False
+        front = claude_in_front()
+        pt = self.perch_point() if (self.perched or self.home) else None
         if self.perched:
-            pt = self.perch_point()
             if pt:
-                self.perch_pt = pt  # follows the window around
+                self.perch_pt = pt  # follows the box around
             if not (self.watcher and self.watcher.hwnd):
                 self.unperch(fall=True)
                 if self.mode != "idle":
                     return
             else:
-                # only show himself while you're actually looking at Claude; debounced so flicking
-                # between apps or tabs quickly doesn't make him bob up and down
-                raw = pt is not None and claude_in_front()
+                # only show himself while you're actually on Claude; debounced so flicking between
+                # apps or tabs quickly doesn't make him bob up and down
+                raw = pt is not None and front and now >= self.no_rise_until
                 if raw != self.vis_raw:
                     self.vis_raw, self.vis_since = raw, now
                 if raw and now - self.vis_since >= 0.12:
@@ -1573,10 +1828,34 @@ class Pet:
                 elif not raw and now - self.vis_since >= 0.35:
                     self.vis = False
                 perch_visible = self.vis
-        elif (now < self.perch_wanted_until and not self.hover and self.pending_alert is None and self.watcher
-              and self.watcher.hwnd and claude_in_front() and self.perch_point()):
-            if self.start_leap():
-                return
+                if pt and self.watcher.target_id != self.seen_target:  # you're typing in another box
+                    self.seen_target = self.watcher.target_id
+                    if perch_visible and self.p > self.HIDE + S and not self.hover:
+                        if self.start_leap():  # hop over to it
+                            return
+                    else:
+                        self.rel_s = None  # out of sight: just move there
+                if front and pt is None:
+                    # no box to sit on (a new chat, or a page without one): after a bit, go wait on
+                    # the side of the screen - not straight away, in case you're just flicking past
+                    if self.lost_since is None:
+                        self.lost_since = now
+                    elif now - self.lost_since >= 2.0 and now >= self.no_side_until and not self.hover:
+                        self.go_sides()
+                        return
+                else:
+                    self.lost_since = None
+        elif self.home and not self.hover and self.pending_alert is None and self.watcher and self.watcher.hwnd:
+            # waiting on the screen edge: once a box is free (and stays free a moment), hop back on
+            if pt and front and now >= self.no_rise_until:
+                if self.ready_since is None:
+                    self.ready_since = now
+                elif now - self.ready_since >= 0.8:
+                    self.ready_since = None
+                    if self.start_leap():
+                        return
+            else:
+                self.ready_since = None
         # hover
         box = self.sprite_screen_box()
         self.set_hit(box)
@@ -1786,7 +2065,7 @@ class Pet:
         try:
             self.handle_messages()
             if self.watcher:
-                self.watcher.want = self.perched or self.mode in ("leap", "summon") or now < self.perch_wanted_until
+                self.watcher.want = self.home or self.perched or self.mode in ("leap", "summon")
             self.tick_panel(now)
             self.step_size(now)
             if self.perched or self.mode == "leap":
