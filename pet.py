@@ -25,6 +25,7 @@ import os
 import queue
 import random
 import socket
+import struct
 import subprocess
 import sys
 import textwrap
@@ -483,6 +484,63 @@ def no_activate(win):
 
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+SHORTCUT = os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs", "Clawd.lnk")
+
+
+def pythonw_exe():
+    exe = sys.executable
+    if exe.lower().endswith("python.exe"):
+        exe = exe[:-10] + "pythonw.exe"
+    return exe
+
+
+def write_icon(path, n=64):
+    """Clawd as a 64x64 .ico, for the Start menu shortcut"""
+    sprite = ["..LLOOOOOOOO..", "..LOOOOOOOOD..", "..OOKOOOOKOD..", "..OOKOOOOKOD..",
+              "OOOOOOOOOOODOO", "DDOOOOOOOOODDD", "..OOOOOOOOOD..", "..DDDDDDDDDD..",
+              "...D.D..D.D...", "...D.D..D.D..."]
+    k = 4
+    x0, y0 = (n - 14 * k) // 2, (n - 10 * k) // 2
+    rows = []
+    for y in range(n - 1, -1, -1):  # bottom-up
+        row = bytearray()
+        for x in range(n):
+            i, j = (x - x0) // k, (y - y0) // k
+            ch = sprite[j][i] if 0 <= j < 10 and 0 <= i < 14 and x >= x0 and y >= y0 else "."
+            if ch == ".":
+                row += b"\0\0\0\0"
+            else:
+                v = int(C[ch][1:], 16)
+                row += bytes((v & 255, (v >> 8) & 255, v >> 16, 255))
+        rows.append(bytes(row))
+    pixels = b"".join(rows) + bytes(n * n // 8)  # colours + an (unused) AND mask
+    bih = struct.pack("<IiiHHIIiiII", 40, n, 2 * n, 1, 32, 0, len(pixels), 0, 0, 0, 0)
+    data = bih + pixels
+    with open(path, "wb") as f:
+        f.write(struct.pack("<HHH", 0, 1, 1) + struct.pack("<BBBBHHII", n, n, 0, 0, 1, 32, len(data), 22) + data)
+
+
+def ensure_shortcut():
+    """put Clawd in the Start menu once (if you delete it, it stays deleted)"""
+    try:
+        if load_state().get("shortcut") or not SHORTCUT:
+            return
+        ico = os.path.join(HERE, "clawd.ico")
+        write_icon(ico)
+
+        def q(v):
+            return "'" + v.replace("'", "''") + "'"
+        ps = (f"$s = (New-Object -ComObject WScript.Shell).CreateShortcut({q(SHORTCUT)}); "
+              f"$s.TargetPath = {q(pythonw_exe())}; $s.Arguments = {q(chr(34) + os.path.abspath(__file__) + chr(34))}; "
+              f"$s.WorkingDirectory = {q(HERE)}; $s.IconLocation = {q(ico)}; "
+              f"$s.Description = 'Clawd, a tiny pixel desktop pet'; $s.Save()")
+        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                       creationflags=0x08000000, timeout=30, capture_output=True)  # CREATE_NO_WINDOW
+        if os.path.exists(SHORTCUT):
+            save_state(shortcut=True)
+            log("added Clawd to the Start menu")
+    except Exception as e:
+        log("shortcut failed", e)
 
 
 def startup_enabled():
@@ -499,10 +557,7 @@ def set_startup(on):
     import winreg
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
         if on:
-            exe = sys.executable
-            if exe.lower().endswith("python.exe"):
-                exe = exe[:-10] + "pythonw.exe"
-            winreg.SetValueEx(k, "ClawdPet", 0, winreg.REG_SZ, f'"{exe}" "{os.path.abspath(__file__)}"')
+            winreg.SetValueEx(k, "ClawdPet", 0, winreg.REG_SZ, f'"{pythonw_exe()}" "{os.path.abspath(__file__)}"')
         else:
             try:
                 winreg.DeleteValue(k, "ClawdPet")
@@ -2729,7 +2784,13 @@ def main():
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         sock.bind(("127.0.0.1", PORT))
     except OSError:
-        return  # already running
+        # already running: have it say hi (and come back if it was hiding) so you can see it
+        try:
+            with socket.create_connection(("127.0.0.1", PORT), timeout=0.5) as c:
+                c.sendall(b"hi|\n")
+        except OSError:
+            pass
+        return
     sock.listen(8)
     q = queue.Queue()
     threading.Thread(target=serve, args=(sock, q), daemon=True).start()
@@ -2759,6 +2820,7 @@ def main():
             log("Claude not running - opening it")
             open_claude()
     threading.Thread(target=ensure_claude, daemon=True).start()
+    threading.Thread(target=ensure_shortcut, daemon=True).start()
     root.mainloop()
 
 
