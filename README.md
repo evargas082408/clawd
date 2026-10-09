@@ -23,7 +23,7 @@ A tiny pixel desktop pet for Windows that lives on the edges of your screen and 
   - It glides along with the box as it grows while you type, and when you move or resize the window, and ducks behind the box when you switch to another app.
   - With several tabs open (several message boxes), it hops to the one you're typing in.
   - It never sits on a brand-new chat, where the app's own little Clawd is. If that's all there is, it waits on the side of the screen and hops back on once the app's Clawd is gone. It waits a couple of seconds before leaving, so flicking quickly between tabs doesn't send it bouncing around.
-  - Drag it off (it grows back to full size in your hand) and throw it to an edge to send it back into hiding, or drop it right above a message box to put it back. (Right-click > *Sit on Claude's input box* also calls it back.)
+  - Drag it off (it grows back to full size in your hand) and throw it to an edge: it hangs out there doing its thing for 10-20 seconds, then pops up and hops back onto the box. The same goes any time it ends up on the screen edges while Claude is open. Drop it right above a message box to put it straight back. (Right-click > *Sit on Claude's input box* also calls it back.)
 - **Summons Claude:** if the Claude app isn't open, drop Clawd in the middle of the screen. He inflates into a window (his arms and legs tuck in, his body turns into the window and his eyes into its loading dots) while the app starts, lines up with the real window, and melts away to reveal it. Then he pops up out of its message box.
 - **Opens Claude for you:** when Clawd starts and neither the Claude desktop app nor Claude Code is running, it launches the Claude app. Clicking Clawd also opens the app if no Claude window can be found.
 

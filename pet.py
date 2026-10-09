@@ -434,7 +434,7 @@ $TS = [System.Windows.Automation.TreeScope]
 $W = [System.Windows.Automation.TreeWalker]::RawViewWalker
 $editCond = New-Object System.Windows.Automation.PropertyCondition($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Edit)
 $btnCond = New-Object System.Windows.Automation.PropertyCondition($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)
-$cache = @{ hwnd = ''; items = @(); t = 0 }
+$cache = @{ hwnd = ''; items = @(); t = 0; ids = ''; gen = 0 }
 
 function Ok($e) {
   if ($e -eq $null) { return $false }
@@ -478,6 +478,9 @@ while ($true) {
       $cache.hwnd = $line
       $cache.items = Find-All ($A::FromHandle([IntPtr][long]$line))
       $cache.t = $now
+      # count how often the set of boxes actually changes (new tab, switched tab, ...)
+      $ids = ($cache.items | ForEach-Object { ($_[1].GetRuntimeId() -join '.') }) -join ','
+      if ($ids -ne $cache.ids) { $cache.ids = $ids; $cache.gen++ }
     }
     $parts = @()
     foreach ($it in $cache.items) {
@@ -496,7 +499,7 @@ while ($true) {
       try { if ($edit.Current.HasKeyboardFocus -or ($edit.Current.ClassName -like '*ProseMirror-focused*')) { $f = 1 } } catch { }
       $parts += ('{0} {1} {2} {3} {4} {5}' -f [int]$b.X, [int]$b.Y, [int]$b.Width, [int]$b.Height, $s, $f)
     }
-    if ($parts.Count -gt 0) { $out = $parts -join ';' }
+    if ($parts.Count -gt 0) { $out = [string]$cache.gen + '#' + ($parts -join ';') }
   } catch { $cache.hwnd = '' }
   [Console]::Out.WriteLine($out)
   [Console]::Out.Flush()
@@ -514,7 +517,8 @@ while ($true) {
             creationflags=0x08000000)  # CREATE_NO_WINDOW
 
     def locate(self, hwnd):
-        """list of {"box": (x, y, w, h), "btn": (x, y, w, h) or None, "focused": bool}, or None"""
+        """(generation, [{"box": (x, y, w, h), "btn": (x, y, w, h) or None, "focused": bool}, ...]) or None;
+        generation changes whenever the set of boxes is replaced"""
         try:
             if self.proc is None or self.proc.poll() is not None:
                 self._start()
@@ -525,6 +529,7 @@ while ($true) {
             log("locator failed", repr(e))
             self.proc = None
             return None
+        gen, _, line = line.partition("#")
         out = []
         for part in line.split(";"):
             try:
@@ -533,7 +538,7 @@ while ($true) {
                 continue
             if len(v) == 9 and v[2] > 0:
                 out.append({"box": tuple(v[:4]), "btn": tuple(v[4:8]) if v[6] > 0 else None, "focused": v[8] == 1})
-        return out or None
+        return (gen, out) if out else None
 
 
 class ClaudeWatcher(threading.Thread):
@@ -556,6 +561,7 @@ class ClaudeWatcher(threading.Thread):
         self.last_check = 0.0
         self.target_key = None
         self.pending_key, self.pending_since = None, 0.0
+        self.gen = None
 
     @staticmethod
     def key(c):  # identity of a box that survives it growing upward while you type
@@ -618,15 +624,19 @@ class ClaudeWatcher(threading.Thread):
                 self.hwnd = h
                 front = claude_in_front()
                 if h and self.want and not is_iconic(h):
-                    comps = self.locator.locate(h)
+                    found = self.locator.locate(h)
                     r = window_rect(h)
-                    if comps and r:
+                    if found and r:
+                        gen, comps = found
                         self.misses = 0
                         now = time.time()
                         keys = [self.key(c) for c in comps]
-                        if (front or self.force) and (self.force or now - self.last_check > 0.6
+                        # look for the app's own Clawd (new chats): when asked, when the boxes were
+                        # replaced (switched / opened a tab), and otherwise every 1.5s
+                        if (front or self.force) and (self.force or gen != self.gen or now - self.last_check > 1.5
                                                       or any(k not in self.newchat for k in keys)):
                             self.force = False
+                            self.gen = gen
                             self.check_new_chats(h, comps, keys)
                         i = self.pick(comps, keys, now)
                         if i is None:
@@ -747,7 +757,8 @@ class Pet:
         self.pan = None             # the window that grows out of him
         self.panel = self.panel_cv = None
         self.pan_last = None
-        self.home = False           # Claude is open: Clawd lives on its message box when he can
+        self.home = bool(watcher and watcher.hwnd)  # Claude is open: Clawd lives on its message box when he can
+        self.return_at = now + random.uniform(10, 20)  # when he's on the screen edges: hop back onto the box after this
         self.lost_since = None      # perched, but the box went away / became a new chat
         self.ready_since = None     # on the screen edges, and a box is free to sit on
         self.seen_target = 0
@@ -975,7 +986,7 @@ class Pet:
         self.slide = 0.0
         self.perched = False
         self.perch_wanted_until = 0
-        self.home = False          # you picked him up: he stays where you put him
+        self.return_at = float("inf")  # (set again once he lands)
         self.set_size(self.S_big)  # grows back in your hand
         self.mode = "drag"
         self.drag_hist.clear()
@@ -1049,6 +1060,7 @@ class Pet:
         self.slide = max(-cap, min(cap, along_v * 0.6))
         self.action, self.action_until = "landed", now + 0.45
         self.next_action = now + random.uniform(4, 7)
+        self.return_at = now + random.uniform(10, 20)  # hang out on the edge a bit, then hop back onto Claude
         self.pending_edge = None
         self.hover = False
         self.bubble = None
@@ -1181,6 +1193,7 @@ class Pet:
 
     def request_perch(self, secs=None):
         self.home = True
+        self.return_at = 0.0  # right away
         if self.watcher:
             self.watcher.want = True
             self.watcher.force = True
@@ -1204,6 +1217,7 @@ class Pet:
         self.action, self.action_until = "peek", now + 2.5
         self.next_action = now + random.uniform(4, 6)
         self.pending_edge = None
+        self.return_at = now + random.uniform(10, 20)
         self._geom = None
 
     def unperch(self, fall=True):
@@ -1612,6 +1626,7 @@ class Pet:
 
     def come_back(self):
         self.mode = "idle"
+        self.return_at = time.time() + random.uniform(10, 20)
         self.root.deiconify()
         self.root.attributes("-topmost", True)
         self._geom = None
@@ -1680,6 +1695,7 @@ class Pet:
                 l, t, r, b = work_area()
                 self.pos = sw // 2 - l
                 self.target = self.pos
+                self.return_at = now + random.uniform(10, 20)
             self.p, self.pgoal = float(self.HIDE), float(self.EYES)
             self.next_action = now + 3
             self.action = None
@@ -1845,11 +1861,17 @@ class Pet:
                         return
                 else:
                     self.lost_since = None
-        elif self.home and not self.hover and self.pending_alert is None and self.watcher and self.watcher.hwnd:
-            # waiting on the screen edge: once a box is free (and stays free a moment), hop back on
+        elif (self.home and not self.hover and self.pending_alert is None and self.watcher and self.watcher.hwnd
+              and now >= self.return_at):
+            # been on the screen edge a while: once a box is free (and stays free a moment), hop back on
             if pt and front and now >= self.no_rise_until:
                 if self.ready_since is None:
                     self.ready_since = now
+                    self.pgoal = self.FULL  # get ready: pop up and eye the box
+                    self.action, self.action_until = "eyeing", now + 1.5
+                    self.sleeping = self.wave = False
+                    self.pending_edge = None
+                    self.target = self.pos
                 elif now - self.ready_since >= 0.8:
                     self.ready_since = None
                     if self.start_leap():
@@ -1919,7 +1941,7 @@ class Pet:
         elif not self.hover:
             if self.perched and self.pgoal == self.HIDE:  # you're back: peek over the box again
                 self.pgoal = self.EYES
-            if self.action in ("peek", "popup", "sleep", "cheer", "landed", "duck") and now > self.action_until:
+            if self.action in ("peek", "popup", "sleep", "cheer", "landed", "duck", "eyeing") and now > self.action_until:
                 landed = self.action == "landed"
                 self.action = None
                 self.wave = False
@@ -2065,7 +2087,8 @@ class Pet:
         try:
             self.handle_messages()
             if self.watcher:
-                self.watcher.want = self.home or self.perched or self.mode in ("leap", "summon")
+                self.watcher.want = (self.perched or self.mode in ("leap", "summon")
+                                     or (self.home and now >= self.return_at - 1.0))
             self.tick_panel(now)
             self.step_size(now)
             if self.perched or self.mode == "leap":
