@@ -72,7 +72,7 @@ LINES_POP = ["hi :)", "just checking", "still here!", "*yawn*", "o/", "wheee"]
 LINES_GRAB = ["hey!", "wahh!", "put me down!", "eek!", "hehe stop"]
 LINES_DONE = ["all done!", "done :)", "ta-da!", "finished!", "your turn!"]
 
-# ---- love & gacha
+# ---- love, moods & looks
 STEAM = [".XX.", "XXXX", ".XX."]
 CLOUD = [".XX.X.", "XXXXXX", ".XXXX."]
 MOOD_LINES = {
@@ -89,17 +89,7 @@ MOOD_LINES = {
     "sulky": {"pop": ["...", "go away", "not talking to you", "*sulks*"], "click": ["...", "leave me alone"],
               "refuse": ["...", "go away", "nope", "*turns away*"], "pet": ["..."], "grab": ["...", "whatever"]},
 }
-MOOD_LUCK = {"smitten": 1.8, "happy": 1.2, "meh": 1.0, "grumpy": 0.6, "sulky": 0.4}  # rare+ odds multiplier
-RARITY = {  # base chance, colour, love it gives
-    "common": (0.58, "#8D96A0", 1),
-    "uncommon": (0.27, "#3FA65A", 2),
-    "rare": (0.10, "#3B7FE6", 4),
-    "epic": (0.04, "#9B5CF6", 6),
-    "legendary": (0.01, "#E0A21A", 10),
-}
-LOOT = {"rare": ["bow", "flower", "party hat"], "epic": ["sunglasses", "halo"], "legendary": ["crown", "golden skin"]}
-ALL_LOOT = ["bow", "flower", "party hat", "sunglasses", "halo", "crown", "golden skin"]
-GEAR = {  # (col, row, w, h, colour) in sprite pixels; rows < 0 sit on top of his head
+GEAR = {  # accessories: (col, row, w, h, colour) in sprite pixels; rows < 0 sit on top of his head
     "crown": [(4, -3, 1, 1, "#F5C451"), (6, -3, 2, 1, "#F5C451"), (9, -3, 1, 1, "#F5C451"),
               (4, -2, 6, 1, "#F5C451"), (6, -2, 2, 1, "#E5484D"), (4, -1, 6, 1, "#C99A2E")],
     "party hat": [(7, -5, 1, 1, "#FFFFFF"), (7, -4, 1, 1, "#F27BA8"), (6, -3, 3, 1, "#5AA9F2"),
@@ -111,7 +101,16 @@ GEAR = {  # (col, row, w, h, colour) in sprite pixels; rows < 0 sit on top of hi
                    (3, 2, 1, 1, "#707070"), (8, 2, 1, 1, "#707070")],
     "halo": [(5, -4, 4, 1, "#F7D96B"), (4, -3, 1, 1, "#F7D96B"), (9, -3, 1, 1, "#F7D96B")],
 }
-SKINS = {"classic": None, "golden": {"O": "#E8B23A", "D": "#B98A1C", "L": "#FBE08A"}}
+SKINS = {  # body colours (orange, shade, highlight; midnight also lightens his eyes)
+    "classic": None,
+    "golden": {"O": "#E8B23A", "D": "#B98A1C", "L": "#FBE08A"},
+    "mint": {"O": "#5CC9A7", "D": "#3A9B7E", "L": "#A6E8D2"},
+    "berry": {"O": "#E06B9A", "D": "#B4467A", "L": "#F2A6C4"},
+    "ocean": {"O": "#4C8FD9", "D": "#2F67AD", "L": "#9CC4EF"},
+    "grape": {"O": "#9B6BD9", "D": "#7449AD", "L": "#C8A9EF"},
+    "midnight": {"O": "#3E4A6B", "D": "#2A3350", "L": "#6C7AA0", "K": "#E8E8F0"},
+    "ghost": {"O": "#E9ECF2", "D": "#C3C8D3", "L": "#FFFFFF"},
+}
 
 
 def log(*a):
@@ -814,6 +813,7 @@ class Pet:
 
         self.menu = tk.Menu(root, tearoff=0)
         self.wear_menu = tk.Menu(self.menu, tearoff=0)
+        self.skin_menu = tk.Menu(self.menu, tearoff=0)
         self.startup_var = tk.BooleanVar(value=startup_enabled())
 
         now = time.time()
@@ -1004,9 +1004,6 @@ class Pet:
             elif eyes == "annoyed":  # unimpressed: flat half-closed lids
                 self.rect(ex - S / 2, top + 2.5 * S, 2 * S, max(1, S / 3), "K")
                 self.rect(ex, top + 3 * S, S, S, "K")
-            elif eyes == "star":  # sparkly gacha eyes
-                self.rect(ex, top + 2 * S, S, 2 * S, "S")
-                self.rect(ex, top + 2 * S, S / 2 + 1, S / 2 + 1, "W")
         if blush:
             self.rect(ox + 3 * S, top + 4 * S, S, S, "P")
             self.rect(ox + 10 * S, top + 4 * S, S, S, "P")
@@ -1044,7 +1041,7 @@ class Pet:
         self.draw_gear(ox, top)
 
     def draw_gear(self, ox, top):
-        """whatever he's wearing from the gacha"""
+        """his accessory (picked from the right-click menu)"""
         item = self.wear
         if item not in GEAR:
             return
@@ -1065,7 +1062,7 @@ class Pet:
             self.say("on it!", 1.2)
             return
         if _e is not None and self.mode == "idle":
-            self.pull()  # every click on him is a gacha pull
+            self.poke()
             self.last_hover = time.time()
             return
         # "Pet Clawd" from the menu
@@ -1272,7 +1269,7 @@ class Pet:
         self.free = None
         self.draw_particles(dt)
 
-    # ---------- love & gacha
+    # ---------- love & moods
     def load_love(self):
         st = load_state()
         now = time.time()
@@ -1285,11 +1282,8 @@ class Pet:
         away = max(0.0, now - num("saved_at", now))
         # he missed you while he wasn't running (gently, and capped)
         self.love = max(0.0, min(100.0, num("love", 60.0) - min(35.0, away / 3600 * 4)))
-        self.pulls, self.pity_rare, self.pity_leg = num("pulls", 0, int), num("pity_rare", 0, int), num("pity_leg", 0, int)
-        owned = st.get("owned", [])
-        self.owned = {x for x in owned if x in ALL_LOOT} if isinstance(owned, list) else set()
-        self.wear = st.get("wear") if st.get("wear") in self.owned else None
-        self.skin = "golden" if (st.get("skin") == "golden" and "golden skin" in self.owned) else "classic"
+        self.wear = st.get("wear") if st.get("wear") in GEAR else None
+        self.skin = st.get("skin") if st.get("skin") in SKINS else "classic"
         self.skin_map = SKINS[self.skin]
         self.last_touch = now
         self.love_dirty, self.next_love_save = True, now + 5
@@ -1299,8 +1293,7 @@ class Pet:
         self.eyes_fx, self.eyes_fx_until = None, 0.0
 
     def save_love(self):
-        save_state(love=round(self.love, 2), saved_at=time.time(), pulls=self.pulls, pity_rare=self.pity_rare,
-                   pity_leg=self.pity_leg, owned=sorted(self.owned), wear=self.wear, skin=self.skin)
+        save_state(love=round(self.love, 2), saved_at=time.time(), wear=self.wear, skin=self.skin)
         self.love_dirty = False
 
     def mood(self):
@@ -1321,27 +1314,8 @@ class Pet:
             self.next_love_save = now + 20
             self.save_love()
 
-    def roll(self):
-        """one gacha roll; better luck the more he loves you, with pity so you can't go dry forever"""
-        self.pulls += 1
-        self.pity_rare += 1
-        self.pity_leg += 1
-        if self.pity_leg >= 60:
-            r = "legendary"
-        elif self.pity_rare >= 10:
-            r = random.choices(["rare", "epic", "legendary"], [10, 4, 1])[0]
-        else:
-            luck = MOOD_LUCK[self.mood()]
-            names = list(RARITY)
-            r = random.choices(names, [RARITY[n][0] * (luck if n in LOOT else 1) for n in names])[0]
-        if r in LOOT:
-            self.pity_rare = 0
-        if r == "legendary":
-            self.pity_leg = 0
-        self.love_dirty = True
-        return r
-
-    def pull(self):
+    def poke(self):
+        """a click: a hop, a line and a little love - though with attitude he might just ignore you"""
         now = time.time()
         S = self.S
         mood = self.mood()
@@ -1358,48 +1332,21 @@ class Pet:
             for _ in range(3):
                 self.spawn("steam")
             return
-        if mood in ("grumpy", "sulky") and now - self.warmed_at > 60:
+        if mood in ("grumpy", "sulky") and now - self.warmed_at > 60 \
+                and random.random() < (0.6 if mood == "sulky" else 0.3):
             # attitude: if you haven't petted him in a while he might just ignore you
-            if random.random() < (0.6 if mood == "sulky" else 0.3):
-                self.say(random.choice(lines["refuse"]), 1.6)
-                self.eyes_fx, self.eyes_fx_until = "annoyed", now + 1.6
-                for _ in range(2):
-                    self.spawn("steam")
-                self.add_love(0.3)  # (attention is still attention)
-                return
-        r = self.roll()
-        col = RARITY[r][1]
-        if self.jump < 1.5 * S:
-            self.jv = (12.0 if r == "legendary" else 9.0) * S
-        if r == "common":
-            self.say(random.choice(lines["click"]), 1.6)
+            self.say(random.choice(lines["refuse"]), 1.6)
+            self.eyes_fx, self.eyes_fx_until = "annoyed", now + 1.6
             for _ in range(2):
-                self.spawn("heart")
-        elif r == "uncommon":
-            if random.random() < 0.5:
-                self.say("+ " + random.choice(lines["click"]) + " +", 1.8, color=col)
-                for _ in range(9):
-                    self.spawn("heart")
-            else:
-                self.eyes_fx, self.eyes_fx_until = "star", now + 1.8
-                self.say("sparkle eyes!", 1.8, color=col)
-                for _ in range(4):
-                    self.spawn("spark", col=col)
-        else:
-            item = random.choice(LOOT[r])
-            new = item not in self.owned
-            self.owned.add(item)
-            if item == "golden skin":
-                self.skin, self.skin_map = "golden", SKINS["golden"]
-            else:
-                self.wear = item
-            banner = {"rare": "* RARE *", "epic": "** EPIC **", "legendary": "*** LEGENDARY ***"}[r]
-            self.say(f"{banner}\n{item}" + ("  NEW!" if new else "  (dupe)"), 3.0 if r == "legendary" else 2.4, color=col)
-            for _ in range({"rare": 6, "epic": 10, "legendary": 18}[r]):
-                self.spawn("spark", col=col)
-            if r == "legendary":
-                self.eyes_fx, self.eyes_fx_until = "star", now + 3.0
-        self.add_love(RARITY[r][2] * (0.5 if mood in ("grumpy", "sulky") else 1.0))
+                self.spawn("steam")
+            self.add_love(0.3)  # (attention is still attention)
+            return
+        if self.jump < 1.5 * S:  # only hop from the ground, so spam-clicking can't stack hops
+            self.jv = 9.0 * S
+        self.say(random.choice(lines["click"]), 1.6)
+        for _ in range(3):
+            self.spawn("heart")
+        self.add_love(1.5 * (0.5 if mood in ("grumpy", "sulky") else 1.0))
 
     def set_wear(self, item):
         self.wear = item
@@ -1410,22 +1357,19 @@ class Pet:
         self.save_love()
 
     def build_menu(self):
-        m, w = self.menu, self.wear_menu
-        m.delete(0, "end")
-        w.delete(0, "end")
+        m, w, sk = self.menu, self.wear_menu, self.skin_menu
+        for menu in (m, w, sk):
+            menu.delete(0, "end")
         m.add_command(label=f"\u2665 Love {int(self.love)}%  \u00b7  {self.mood()}", state="disabled")
-        m.add_command(label=f"Pulls {self.pulls}  \u00b7  collection {len(self.owned)}/{len(ALL_LOOT)}", state="disabled")
+        for name in SKINS:
+            sk.add_command(label=("\u2713 " if self.skin == name else "     ") + name,
+                           command=lambda n=name: self.set_skin(n))
         w.add_command(label=("\u2713 " if self.wear is None else "     ") + "nothing", command=lambda: self.set_wear(None))
-        for item in ALL_LOOT:
-            if item in self.owned and item in GEAR:
-                w.add_command(label=("\u2713 " if self.wear == item else "     ") + item,
-                              command=lambda i=item: self.set_wear(i))
-        if "golden skin" in self.owned:
-            w.add_separator()
-            for sk in ("classic", "golden"):
-                w.add_command(label=("\u2713 " if self.skin == sk else "     ") + sk + " skin",
-                              command=lambda s_=sk: self.set_skin(s_))
-        m.add_cascade(label="Wear", menu=w, state="normal" if self.owned else "disabled")
+        for item in GEAR:
+            w.add_command(label=("\u2713 " if self.wear == item else "     ") + item,
+                          command=lambda i=item: self.set_wear(i))
+        m.add_cascade(label="Skin", menu=sk)
+        m.add_cascade(label="Accessory", menu=w)
         m.add_separator()
         m.add_command(label="Pet Clawd", command=lambda: self.q.put(("hi", "")))
         m.add_command(label="Test permission alert", command=lambda: self.q.put(("alert", "Bash")))

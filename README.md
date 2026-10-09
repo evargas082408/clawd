@@ -15,12 +15,11 @@ A tiny pixel desktop pet for Windows that lives on the edges of your screen and 
 - **Hover** to pet it: it climbs out, gets happy eyes, and hearts float up. Move your mouse away and it ducks back down right away.
 - **Click** it and it hops.
 - **Drag** it off its edge: it squirms in your grip. Let go and it falls the way you threw it. Gravity pulls it toward the nearest edge, and if you let go in the middle of the screen it just falls down. It turns to face the wall it's about to hit, lands, slides along the edge with leftover momentum, and slips straight back into hiding.
-- **Love & gacha:**
-  - Clawd has a love meter (0-100%, shown as 5 pixel hearts over his head). Petting him (hovering) slowly fills it, and every click on him is a gacha pull. Ignoring him drains it.
-  - His mood follows his love: smitten (blushing, floating hearts), happy, meh, grumpy (unimpressed eyes, crossed arms, steam, sassy lines, refuses pets until you keep at it) and sulky (a little rain cloud, hides from you, ignores clicks).
-  - Pulls roll Common / Uncommon / Rare / Epic / Legendary. Rare and up drop wearable loot: bow, flower, party hat (Rare), sunglasses, halo (Epic), crown, golden skin (Legendary). The better his mood, the better your odds. Pity guarantees a Rare+ within 10 pulls and a Legendary within 60. Spam-clicking annoys him, and throwing him around is fun when he likes you and rude when he doesn't.
-  - Right-click shows his love, mood, pulls and collection, and the **Wear** menu switches outfits. Progress is saved in `state.json`.
-- **Right-click** for a menu: test alert, hide for 10 minutes, start with Windows, quit.
+- **Love & moods:**
+  - Clawd has a love meter (0-100%, shown as 5 pixel hearts over his head). Petting him (hovering) slowly fills it, clicking him adds a little, and ignoring him drains it. It's saved in `state.json`.
+  - His mood follows his love: smitten (blushing, floating hearts), happy, meh, grumpy (unimpressed eyes, crossed arms, steam, sassy lines, refuses pets until you keep at it) and sulky (a little rain cloud, hides from you, ignores clicks). Spam-clicking annoys him, and throwing him around is fun when he likes you and rude when he doesn't.
+- **Skins & accessories:** right-click > **Skin** picks his colours (classic, golden, mint, berry, ocean, grape, midnight, ghost) and **Accessory** puts something on him (crown, party hat, bow, flower, sunglasses, halo). Your pick is remembered.
+- **Right-click** for a menu: his love and mood, skin, accessory, test alert, hide for 10 minutes, start with Windows, quit.
 - **Permission alerts:** when Claude Code asks for permission, Clawd drops down from the top-center of the screen and dangles there until you respond. Click it to jump to the Claude window.
 - **Done cheer:** when Claude finishes a reply, Clawd pops up and cheers.
 - Stays quiet if you're already looking at the Claude desktop app or a claude.ai tab.
