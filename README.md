@@ -51,9 +51,15 @@ A tiny pixel desktop pet for Windows that lives on the edges of your screen and 
 ## Setup
 
 1. Clone this repo somewhere permanent, e.g. `C:\Users\<you>\.claude\claude-pet`.
-2. Start it: `pythonw pet.py`
+2. Start it from the repo folder with `pythonw pet.py`, or from anywhere with the full path, e.g. `pythonw C:\Users\<you>\.claude\claude-pet\pet.py`. (`pythonw` never shows errors, so if nothing happens, check the path.) The first time it runs, it adds **Clawd** to your Start menu.
 3. Right-click Clawd and tick **Start with Windows** if you want it at login.
 4. Add the hooks from [`hooks.example.json`](hooks.example.json) to `~/.claude/settings.json`. Change the Python and repo paths to match your machine.
+
+### Reopening Clawd after quitting
+
+- Press the Windows key, type **Clawd**, and hit Enter.
+- He also comes back by himself the next time Claude sends a notification or you start a new Claude Code session.
+- Starting him while he's already running just makes him pop up and say hi (it also brings him back early from *Hide for 10 minutes*).
 
 `notify.py` is what the hooks call. It reads the hook's JSON, works out what kind of notification it is, sends it to the running pet over `127.0.0.1:47863`, and starts the pet if it isn't running yet.
 
